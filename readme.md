@@ -11,7 +11,7 @@ Ahí es donde entra **`pg-bg-orchestrator`**. Como su nombre lo indica, es un **
 **¿Qué es un Orquestador?**
 Piensa en él como el director de una orquesta o un policía de tránsito para tu base de datos. No se limita simplemente a mandar las tareas al "fondo" (background), sino que toma el control total y de forma inteligente:
 * Decide **cuándo** y en qué **orden estricto** se ejecutan los pasos.
-* Controla **cuántas** tareas pueden correr al mismo tiempo sin asfixiar la memoria del servidor.
+* Controla **cuántas** tareas pueden correr al mismo tiempo.
 * Toma decisiones críticas si algo sale mal: ¿Debe reintentar la tarea? ¿Debe ignorarla y seguir? ¿O debe accionar un botón de pánico y abortar todo?
 
 Hace un trabajo de coordinación muy similar al de herramientas de colas externas gigantes (como Airflow, Celery o RabbitMQ), pero **enfocado exclusivamente en bases de datos**, ahorrándote la pesadilla de instalar y mantener servidores extra si toda tu lógica de negocio ya vive dentro de PostgreSQL.
@@ -45,6 +45,16 @@ Puedes decirle al orquestador cómo quieres que consuma tu lista de tareas. Tene
 
 ---
 
+
+## ⚠️ Nota Crítica de Infraestructura (Límite de Procesos del Servidor)
+
+Aunque este framework te da la libertad de configurar el límite de hilos concurrentes mediante el parámetro `p_max_parallel_processes`, **el motor FOAR no puede hacer magia por encima de las restricciones de tu servidor**. 
+
+Toda la asincronía de esta herramienta se apoya sobre la extensión `pg_background`, la cual consume ranuras o "slots" de un parámetro nativo de PostgreSQL llamado **`max_worker_processes`** (definido en tu archivo `postgresql.conf`).
+
+**¿Qué significa esto en la vida real?**
+* Si en tu base de datos configuras un Job con `p_max_parallel_processes => 20`, pero tu servidor PostgreSQL tiene un límite general de `max_worker_processes = 8`, el orquestador se estampará contra una pared física. Intentará abrir el proceso 9, pero el sistema operativo le negará el espacio, provocando un error de tipo *"background worker slot not available"*.
+* **Recomendación de oro:** Antes de realizar pruebas de estrés masivas, coordina con tu DBA para revisar la capacidad de tu servidor y asegúrate de que el valor de `max_worker_processes` en la configuración de PostgreSQL sea **siempre mayor** al número de procesos máximos que planeas ejecutar en tus Jobs asíncronos. ¡Cuida tu hardware!
 
 ### 🛠️ Un Caso de Uso Real: El día a día de un DBA
 
