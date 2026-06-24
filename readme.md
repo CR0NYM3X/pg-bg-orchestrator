@@ -1,66 +1,67 @@
-# 🌟 pg-bg-orchestrator (FOAR)
-**Orquestación de tareas en segundo plano, nativa y amigable para PostgreSQL.** <br>
-**(FOAR) Framework de Orquestación Asíncrona Resiliente.**
-
-## 🤔 ¿Qué es y para qué sirve?
-
-A veces necesitas ejecutar consultas pesadas, mantenimientos masivos o migraciones de datos. Si lo haces de forma tradicional, tu conexión se queda "pensando" (congelada) y te impide seguir trabajando o bloquea a otros usuarios. 
-
-Ahí es donde entra **`pg-bg-orchestrator`**. Como su nombre lo indica, es un **Orquestador**. 
-
-**¿Qué es un Orquestador?**
-Piensa en él como el director de una orquesta o un policía de tránsito para tu base de datos. No se limita simplemente a mandar las tareas al "fondo" (background), sino que toma el control total y de forma inteligente:
-* Decide **cuándo** y en qué **orden estricto** se ejecutan los pasos.
-* Controla **cuántas** tareas pueden correr al mismo tiempo.
-* Toma decisiones críticas si algo sale mal: ¿Debe reintentar la tarea? ¿Debe ignorarla y seguir? ¿O debe accionar un botón de pánico y abortar todo?
-
-Hace un trabajo de coordinación muy similar al de herramientas de colas externas gigantes (como Airflow, Celery o RabbitMQ), pero **enfocado exclusivamente en bases de datos**, ahorrándote la pesadilla de instalar y mantener servidores extra si toda tu lógica de negocio ya vive dentro de PostgreSQL.
-
-## 🏆 Agradecimientos Especiales
-Antes de empezar, todo el crédito y un enorme agradecimiento a **Robert Haas**, el brillante creador de la extensión `pg_background`. Sin su trabajo pionero para permitir procesos asíncronos nativos en PostgreSQL, este orquestador simplemente no existiría. ¡Gracias, Robert!
-
-## 📋 Requisitos Previos
-Para que este framework funcione en tu base de datos, necesitas:
-* PostgreSQL 10 o superior.
-* La extensión `pg_background` instalada en tu servidor.
-
  
+# 🌟 pg-bg-orchestrator (AROF)
+**Native, developer-friendly background task orchestration for PostgreSQL.** <br>
+**(AROF) Asynchronous Resilient Orchestration Framework.**
+
+## 🤔 What is it and what is it for?
+
+Sometimes you need to execute heavy queries, massive database maintenance, or complex data migrations. If you run them the traditional way, your client connection hangs ("freezes"), preventing you from doing anything else and potentially blocking other users.
+
+That is where **`pg-bg-orchestrator`** comes in. As its name suggests, it is an **Orchestrator**. 
+
+**What is an Orchestrator?**
+Think of it as a conductor for an orchestra or a traffic cop for your database. It does not just blindly push tasks to the background; it takes full, intelligent control:
+* It decides **when** and in what **strict order** steps are executed.
+* It controls **how many** tasks can run simultaneously without suffocating your server's memory.
+* It makes critical decisions if something goes wrong: Should it retry the task? Should it ignore it and move on? Or should it hit the panic button and abort the entire job?
+
+It performs a coordination job very similar to massive external message queues or workflow tools (like Airflow, Celery, or RabbitMQ), but **focused exclusively on database tasks**. This saves you the nightmare of installing, configuring, and maintaining extra servers if all your business logic already lives inside PostgreSQL.
+
+## 🏆 Special Thanks
+Before getting started, full credit and a huge thank you to **Robert Haas**, the brilliant creator of the `pg_background` extension. Without his pioneering work allowing native asynchronous processes in PostgreSQL, this orchestrator quite simply would not exist. Thank you, Robert!
+
+## 📋 Prerequisites
+To run this framework in your database, you need:
+* PostgreSQL 10 or higher.
+* The `pg_background` extension installed on your server.
+
 ---
 
-## 🚦 Modos de Ejecución (¿Cómo procesamos la cola?)
+## 🚦 Execution Modes (How do we process the queue?)
 
-Puedes decirle al orquestador cómo quieres que consuma tu lista de tareas. Tenemos 4 sabores distintos:
+You can tell the orchestrator exactly how you want it to consume your task list. We offer 4 distinct flavors:
 
-* 🛤️ **`SEQUENTIAL_STRICT` (Paso a paso estricto)**
-  * **Cómo ejecuta:** Toma la tarea 1 -> espera que termine el proceso hijo antes de abrir otro. Si retorna un éxito, abre el siguiente; de lo contrario, aborta todos los demás procesos que estaban en la lista.
+* 🛤️ **`SEQUENTIAL_STRICT` (Strict Step-by-Step)**
+  * **How it executes:** It picks up Task 1 -> waits for the child process to finish before opening another one. If it returns a success, it opens the next one; otherwise, it immediately aborts all remaining tasks left in the list.
 
-* 🚶 **`SEQUENTIAL_NORMAL` (Paso a paso tolerante)**
-  * **Cómo ejecuta:** Toma la tarea 1 -> espera a que termine el proceso, pero *no le importa si marcó error o fue exitoso*. Él ejecutará el siguiente proceso de la lista una vez que haya terminado el anterior.
+* 🚶 **`SEQUENTIAL_NORMAL` (Tolerant Step-by-Step)**
+  * **How it executes:** It picks up Task 1 -> waits for the process to finish, but *it does not care if it errored out or succeeded*. It will relentlessly execute the next process in the list as soon as the previous one finishes.
 
-* 🌊 **`CONCURRENT_ORDERED` (Ráfaga ordenada con límite)**
-  * **Cómo ejecuta:** Toma el primero de la lista y *no espera a que termine*. Casi al instante ejecuta la siguiente tarea, y la siguiente, y la siguiente, hasta cumplir con el límite que le pusiste en `p_max_parallel_processes`. Una vez que llega al máximo de procesos permitidos, ahí empieza a esperar a que finalice uno para abrir otro, tratando de mantener siempre tu límite al tope.
+* 🌊 **`CONCURRENT_ORDERED` (Ordered Burst with Safety Valve)**
+  * **How it executes:** It picks up the first task in the list and *does not wait for it to finish*. Almost instantly, it executes the next task, and the next, and the next, until it hits the concurrency limit you specified in `p_max_parallel_processes`. Once it reaches that cap, it begins waiting for any active process to finish before spawning the next one, constantly keeping your specified limit maxed out.
 
-* 🎲 **`RANDOM` (Ráfaga aleatoria anti-bloqueos)**
-  * **Cómo ejecuta:** De manera aleatoria (ej. primero la tarea 1, luego la 5, la 2, la 8). Este no sigue un orden, pero igual respeta tu límite `p_max_parallel_processes`. Una vez que cumple con ese límite, espera a que finalice uno y abre otro proceso. ¡Excelente para evitar que el disco duro se sature escribiendo en el mismo lugar!
+* 🎲 **`RANDOM` (Shuffled Burst / Lock Avoidance)**
+  * **How it executes:** It picks up tasks completely at random (e.g., Task 1, then Task 5, Task 2, Task 8). It does not follow any numerical order, but it strictly respects your `p_max_parallel_processes` safety limit. Once it fills up your parallel capacity, it waits for an slot to open up and fires another random process. This is excellent for preventing your storage disk from bottlenecking when writing to sequential rows!
 
 ---
 
+## ⚠️ Critical Infrastructure Note (Server Process Limits)
 
-## ⚠️ Nota Crítica de Infraestructura (Límite de Procesos del Servidor)
+Even though this framework gives you the freedom to configure your concurrent thread limit using the `p_max_parallel_processes` parameter, **the AROF engine cannot perform magic above your server's physical limits**. 
 
-Aunque este framework te da la libertad de configurar el límite de hilos concurrentes mediante el parámetro `p_max_parallel_processes`, **el motor FOAR no puede hacer magia por encima de las restricciones de tu servidor**. 
+All asynchronous capabilities in this tool rely on the `pg_background` extension, which consumes slots from a native PostgreSQL configuration parameter called **`max_worker_processes`** (defined inside your `postgresql.conf` file).
 
-Toda la asincronía de esta herramienta se apoya sobre la extensión `pg_background`, la cual consume ranuras o "slots" de un parámetro nativo de PostgreSQL llamado **`max_worker_processes`** (definido en tu archivo `postgresql.conf`).
+**What does this mean in real-world operations?**
+* If you configure a Job with `p_max_parallel_processes => 20`, but your PostgreSQL server has a global configuration capping `max_worker_processes = 8`, the orchestrator will hit a brick wall. It will try to spawn the 9th concurrent task, but the operating system will deny the slot, triggering a native PostgreSQL error: *"background worker slot not available"*.
+* **Golden Rule:** Before running massive concurrent stress tests, coordinate with your DBA to review your server capacity. Make sure that the `max_worker_processes` value in your PostgreSQL configuration is **always greater** than the maximum number of parallel processes you plan to run across your active async jobs. Protect your hardware!
 
-**¿Qué significa esto en la vida real?**
-* Si en tu base de datos configuras un Job con `p_max_parallel_processes => 20`, pero tu servidor PostgreSQL tiene un límite general de `max_worker_processes = 8`, el orquestador se estampará contra una pared física. Intentará abrir el proceso 9, pero el sistema operativo le negará el espacio, provocando un error de tipo *"background worker slot not available"*.
-* **Recomendación de oro:** Antes de realizar pruebas de estrés masivas, coordina con tu DBA para revisar la capacidad de tu servidor y asegúrate de que el valor de `max_worker_processes` en la configuración de PostgreSQL sea **siempre mayor** al número de procesos máximos que planeas ejecutar en tus Jobs asíncronos. ¡Cuida tu hardware!
+---
 
-### 🛠️ Un Caso de Uso Real: El día a día de un DBA
+### 🛠️ A Real-World Case Study: The Daily Life of a DBA
 
-Imagina que son las 2:00 AM y necesitas hacer una limpieza profunda de una tabla gigantesca. Quieres que los pasos se ejecuten en un orden súper estricto, porque no tiene sentido gastar recursos del servidor haciendo un `VACUUM` o un `REINDEX` si el borrado de datos falló.
+Imagine it is 2:00 AM and you need to perform deep maintenance on a gigantic table. You need these steps to execute in a super-strict order, because it makes absolutely no sense to waste server CPU running a `VACUUM` or a `REINDEX` if your initial `DELETE` script failed.
 
-**La Solución usando el modo `SEQUENTIAL_STRICT`:**
+**The Solution using `SEQUENTIAL_STRICT` mode:**
 
 ```sql
 SELECT bg.launch_job_one_shot(
@@ -76,59 +77,59 @@ SELECT bg.launch_job_one_shot(
 
 ```
 
-**¿Qué va a pasar internamente en el servidor?**
-El Orquestador tomará esta lista y creará un carril único de ejecución. Lanzará la primera tarea (el `DELETE`) y se pondrá a esperar pacientemente en segundo plano.
+**What will happen internally on your server?**
+The Orchestrator will take this array and create a single-lane execution pipeline. It will launch the first task (the `DELETE`) and patiently sleep in the background.
 
-* Si el `DELETE` termina con éxito, el Orquestador lo marcará con una palomita y lanzará automáticamente la segunda tarea (el `VACUUM`), y así sucesivamente respetando el orden.
-* Si el `DELETE` falla (por ejemplo, porque la tabla estaba bloqueada por otro proceso en la madrugada), la regla "Estricta" entra en acción: el Orquestador abortará el trabajo completo, marcará las siguientes 3 tareas como canceladas y no gastará CPU intentando ejecutarlas.
+* If the `DELETE` completes successfully, the Orchestrator marks it with a checkmark and automatically fires the second task (the `VACUUM`), proceeding smoothly down the line.
+* If the `DELETE` fails (for example, because the table was locked by a rogue transaction early in the morning), the "Strict" rule triggers instantly: the Orchestrator aborts the entire job right there, marks the remaining 3 tasks as cancelled, and gracefully stops without wasting any more CPU.
 
-**¿Qué se espera de este proceso?**
-Tranquilidad operativa. El DBA puede irse a dormir sabiendo que, al revisar la base de datos a la mañana siguiente, solo encontrará dos escenarios posibles:
+**What is expected from this process?**
+Operational peace of mind. The DBA can go to sleep knowing that upon checking the database the next morning, only two outcomes are possible:
 
-1. Un tablero en **`COMPLETED`**, garantizando que los 4 pasos se ejecutaron en el orden correcto y la tabla está optimizada.
-2. Un tablero en **`FAILED`**, donde verá exactamente en qué paso se detuvo el motor junto con el mensaje de error original de PostgreSQL. La base de datos estará a salvo de mantenimientos ejecutados a medias.
+1. A dashboard marked as **`COMPLETED`**, guaranteeing all 4 steps executed perfectly in sequence and the table is fully optimized.
+2. A dashboard marked as **`FAILED`**, highlighting exactly at which step the engine stopped alongside the raw, original PostgreSQL error message. Your database is completely safe from half-baked, broken maintenance cycles.
 
+---
 
+### 📊 Ecosystem Comparative Analysis
+
+To understand where `pg-bg-orchestrator` fits best, it helps to see how it solves problems compared to other solutions on the market. It does not replace an enterprise multi-cloud workflow suite, but it shines when your workload is purely data-centric and resides entirely inside PostgreSQL.
+
+| Operational Capability | 💎 pg-bg-orchestrator | `pg_cron` (Extension) | `pgmq` / SQL Queues | External (Airflow / Celery) |
+| --- | --- | --- | --- | --- |
+| **Primary Trigger** | On-Demand (Events/Instant) | Clock-Based (Fixed Schedules) | On-Demand | Events, Cron, and Web APIs |
+| **Infrastructure Overhead** | **Zero** (100% Native SQL) | **Zero** (Native) | Requires external scripts to read queues | **High** (Python nodes, Redis, DevOps) |
+| **Concurrency Pool Limits** | Yes (Configurable strict valve) | No | No (Depends on external consumer) | Yes (Highly granular tuning) |
+| **Time Controls (Timeouts)** | Native process-level auto-kill | No | No | Yes (Managed by external workers) |
+| **Automatic Retries** | Integrated per task | No | Integrated | Integrated |
+| **Out-of-DB Integration** | Limited (Requires `dblink`/`fdw`) | Limited | Excellent (If your script supports it) | **Native** (Webhooks, Clouds, Servers) |
+
+---
+
+## 📖 Meet the Objects (API)
+
+Don't worry, the system uses very simple tables and objects to keep track of everything under the hood:
+
+**🗄️ Tables (Where data is stored):**
+
+* `bg.cat_queries`: Stores unique SQL scripts (deduplicated via native MD5 hashes).
+* `bg.def_jobs`: Stores the configuration templates for your jobs (limits, timeouts, and max retries).
+* `bg.def_tasks`: This is your "recipe book"; it maps which steps belong to which Job.
+* `bg.run_jobs`: High-level execution logs tracking when a general Job started and ended.
+* `bg.run_tasks`: The live queue! Tracks the step-by-step real-time status of every task and captures failure logs.
+* `bg.run_tasks_errors_history`: **[NEW]** The immutable forensic black box. It archives the task status, failed attempt, and the exact query text of any transaction before it gets cleared for a retry cycle.
+
+**👁️ Views (For easy monitoring):**
+
+* `bg.vw_status_progreso_corporativo`: A highly readable, management-ready dashboard displaying progress percentage (%), active background workers, and automated progress bars.
+* `bg.vw_trazabilidad_forense`: **[NEW]** Pure textual view designed for DBAs, ORMs, and automation tooling. It measures net task duration, queue latency, and execution summaries with ms precision.
+
+**⚙️ Functions & Procedures (Your control room):**
+
+* `bg.create_job_definition()`: Creates or updates a reusable Job template.
+* `bg.start_job()`: Pulls the trigger on a pre-defined Job template to wake up the orchestrator.
+* `bg.launch_job_one_shot()`: The ultimate wrapper! Creates and executes a Job simultaneously in a single command line.
+* `bg.replicate_query()`: A utility function that clones an SQL query $X$ amount of times in memory—perfect for preparing high-throughput stress tests.
+* `bg.abort_job()`: **[NEW]** The global emergency brake (Kill Switch). It intercepts an active job, sends a SIGINT signal to cancel the parent orchestrator and all live workers at the OS level, and destroys the remaining queue instantly.
 
  
----
-
-### 📊 Análisis Comparativo del Ecosistema
-
-Para entender dónde encaja `pg-bg-orchestrator`, es importante ver qué resuelve frente a otras soluciones del mercado. No reemplaza a un ecosistema multinube, pero brilla cuando tu carga de trabajo es puramente transaccional y reside en PostgreSQL.
-
-| Capacidad Operativa | 💎 pg-bg-orchestrator | `pg_cron` (Extensión) | `pgmq` / Colas SQL | Externas (Airflow / Celery) |
-| --- | --- | --- | --- | --- |
-| **Disparador Principal** | Bajo demanda (Eventos/Instantáneo) | Basado en reloj (Horarios fijos) | Bajo demanda | Eventos, Horarios y APIs |
-| **Infraestructura Requerida** | **Cero** (100% Nativo en Postgres) | **Cero** (Nativo) | Requiere scripts externos para leer la cola | **Alta** (Servidores Python, Redis, DevOps) |
-| **Límites de Concurrencia (Pools)** | Sí (Válvula estricta configurable) | No | No (Depende de tu script externo) | Sí (Altamente configurable) |
-| **Control de Tiempos (Timeouts)** | Auto-kill a nivel de proceso nativo | No | No | Sí (Manejado por el worker externo) |
-| **Reintentos Automáticos** | Integrado por tarea | No | Integrado | Integrado |
-| **Integración fuera de la BD** | Limitado (Requiere `dblink`/`fdw`) | Limitado | Excelente (Si tu script lo soporta) | **Nativo** (Conecta APIs, Nubes, Servidores) |
-
----
-
-
-## 📖 Conoce los Objetos (API)
-
-No te asustes, el sistema usa tablitas muy sencillas para llevar su propio control:
-
-**🗄️ Tablas (Donde guardamos las cosas):**
-
-* `bg.cat_queries`: Aquí se guarda el texto de tus consultas (sin repetirse).
-* `bg.def_jobs`: Aquí guardamos las reglas de tu trabajo (límites y reintentos).
-* `bg.def_tasks`: Aquí se guarda el orden de los pasos de tu trabajo.
-* `bg.run_jobs`: El historial. Aquí se anota a qué hora empezó y terminó el trabajo general.
-* `bg.run_tasks`: ¡La cola en vivo! Aquí se guarda el estatus de cada pasito y los mensajes de error.
-
-**👁️ Vistas (Para que audites fácilmente):**
-
-* `bg.vw_status_progreso_corporativo`: Un tablero súper amigable que te muestra el avance %, qué está corriendo y qué falló.
-
-**⚙️ Funciones (Tus controles principales):**
-
-* `bg.create_job_definition()`: Crea una plantilla para usarla después.
-* `bg.start_job()`: Enciende un trabajo que ya habías creado.
-* `bg.launch_job_one_shot()`: ¡Todo en uno! Crea y arranca el trabajo en el mismo comando.
-* `bg.replicate_query()`: Te ayuda a clonar una consulta muchas veces para hacer pruebas de estrés.
-
