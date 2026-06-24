@@ -1,0 +1,342 @@
+
+# 🧪 LABORATORIO DIAMANTE: SIMULADOR DE CRISIS Y OPERACIONES REALES
+
+Estimado equipo, este laboratorio demuestra el poder del framework `bg` operando sobre datos reales. Ejecuten cada bloque en orden.
+
+## 🛠️ PASO 0: Creación del Entorno (El Sandbox de Producción)
+
+Vamos a crear tablas que simulan la realidad de su empresa: cuentas bancarias, tablas de limpieza de DBA, y registros de sensores (IoT).
+
+```sql
+-- 1. Crear el esquema aislado
+CREATE SCHEMA IF NOT EXISTS bg_lab;
+
+-- 2. Tabla para el Desarrollador (Finanzas)
+CREATE TABLE IF NOT EXISTS bg_lab.banco_cuentas (
+    cuenta_id SERIAL PRIMARY KEY,
+    cliente VARCHAR(50),
+    saldo NUMERIC(15,2)
+);
+
+-- 3. Tabla para el Senior ETL (Cargas Masivas)
+CREATE TABLE IF NOT EXISTS bg_lab.etl_ventas_staging (
+    id SERIAL PRIMARY KEY,
+    region VARCHAR(50),
+    monto NUMERIC(10,2),
+    procesado BOOLEAN DEFAULT FALSE
+);
+
+-- 4. Tabla para QA / Pruebas de Estrés (IoT)
+CREATE TABLE IF NOT EXISTS bg_lab.iot_sensores_log (
+    log_id SERIAL PRIMARY KEY,
+    sensor_id INT,
+    lectura NUMERIC(5,2),
+    fecha TIMESTAMP DEFAULT CLOCK_TIMESTAMP()
+);
+
+-- 5. Preparar los datos iniciales
+TRUNCATE TABLE bg_lab.banco_cuentas, bg_lab.etl_ventas_staging, bg_lab.iot_sensores_log RESTART IDENTITY CASCADE;
+INSERT INTO bg_lab.banco_cuentas (cliente, saldo) VALUES ('Empresa A', 10000.00), ('Proveedor B', 0.00);
+
+INSERT INTO bg_lab.banco_cuentas (cliente, saldo) 
+VALUES
+    ('Corporativo Alfa S.A.', 1500000.00),
+    ('María Fernanda López', 3450.50),
+    ('Juan Carlos Rivera', 125.00),
+    ('Tech Solutions LLC', 89400.75),
+    ('Ana Victoria Ruiz', 45000.20);
+
+INSERT INTO bg_lab.etl_ventas_staging (region, monto, procesado) 
+VALUES
+    ('Norte', 12500.00, FALSE),
+    ('Sur', 8400.50, FALSE),
+    ('Centro', 450.25, TRUE),
+    ('Occidente', 32000.00, FALSE),
+    ('Bajío', 1500.99, TRUE);
+
+INSERT INTO bg_lab.iot_sensores_log (sensor_id, lectura) 
+VALUES
+    (101, 24.50),
+    (102, 18.25),
+    (101, 24.65), -- Simulando una segunda lectura del mismo sensor
+    (103, 89.10),
+    (104, 12.00);
+
+select * from bg_lab.banco_cuentas;
+select * from bg_lab.etl_ventas_staging;
+select * from bg_lab.iot_sensores_log;
+
+```
+
+---
+
+## 🏛️ ESCENARIO 1: El Escudo Financiero (Rol: Desarrollador Backend)
+
+* **Modo:** `SEQUENTIAL_STRICT` (Uno por uno. Si uno falla, aborta las actividades siguientes).
+* **El Caso Real:** Hay que transferir $5,000 de la Empresa A al Proveedor B. El sistema resta el dinero a la Empresa A (Paso 1). Pero de pronto, el sistema de red falla (Paso 2).
+* **¿Para qué sirve?:** Evita la corrupción de datos. Si el sistema no fuera estricto, el Paso 3 se ejecutaría y le regalaría $5,000 al Proveedor B sin haber completado la validación.
+
+**Ejecución:**
+
+```sql
+SELECT bg.launch_job_one_shot(
+    '01_TRANSFERENCIA_BANCARIA', 
+    'SEQUENTIAL_STRICT', 
+    ARRAY[
+        'UPDATE bg_lab.banco_cuentas SET saldo = saldo - 5000 WHERE cliente = ''Empresa A'';',
+        'SELECT 1 / 0; -- FALLO CRÍTICO DE RED SIMULADO',
+        'UPDATE bg_lab.banco_cuentas SET saldo = saldo + 5000 WHERE cliente = ''Proveedor B'';'
+    ]
+);
+
+```
+
+**🔍 Cómo Validarlo (Auditoría):**
+
+1. **Auditoría de Orquestación:** `SELECT * FROM bg.vw_status_progreso_corporativo WHERE "Nombre del Job" = '01_TRANSFERENCIA_BANCARIA';`
+*(Verá Estatus `❌ FALLIDO CON ERRORES`. Hechas: 1, Errores: 1, En Espera: 1. El motor se detuvo en seco).*
+2. **Auditoría de Negocio:** `SELECT * FROM bg_lab.banco_cuentas;`
+*(Verá que el Proveedor B sigue teniendo $0.00. El dinero no se creó de la nada. La base de datos está a salvo).*
+
+---
+
+## 🧹 ESCENARIO 2: Continuidad Operativa (Rol: Administrador DBA)
+
+* **Modo:** `SEQUENTIAL_NORMAL` (Uno por uno. Si uno falla, lo anota y sigue con el resto).
+* **El Caso Real:** A las 3:00 AM, el DBA programa la limpieza de particiones de logs históricos de 3 meses distintos. El mes de Febrero fue borrado por error ayer. Si el script fuera estricto, la rutina de mantenimiento se abortaría y Marzo no se limpiaría.
+* **¿Para qué sirve?:** Para mantenimiento o procesos que no son interdependientes. Absorbe el error, aísla la falla y obliga al motor a terminar el trabajo restante para no afectar la operación del día siguiente.
+
+**Ejecución:**
+
+```sql
+SELECT bg.launch_job_one_shot(
+    '02_MANTENIMIENTO_DBA', 
+    'SEQUENTIAL_NORMAL', 
+    ARRAY[
+        'DELETE FROM bg_lab.iot_sensores_log WHERE log_id <= 3;',
+        'DROP TABLE tabla_historial_febrero; -- ERROR: LA TABLA NO EXISTE',
+        'DELETE FROM bg_lab.etl_ventas_staging WHERE procesado = false;'
+    ]
+);
+
+```
+
+**🔍 Cómo Validarlo (Auditoría):**
+
+1. **Auditoría de Orquestación:** Revise el tablero.
+*(Verá `✅ FINALIZADO`. Hechas: 2, Errores: 1. Transparencia total. El orquestador esperó a que terminara la limpieza de IoT antes de intentar borrar la tabla, falló, y luego limpió el ETL secuencialmente).*
+
+```SQL
+SELECT * FROM bg.vw_status_progreso_corporativo where "Nombre del Job"= '02_MANTENIMIENTO_DBA' order by "ID Ejecución" desc limit 2;
+
+select * from bg_lab.banco_cuentas;
+select * from bg_lab.etl_ventas_staging;
+select * from bg_lab.iot_sensores_log;
+```
+---
+
+## ⚡ ESCENARIO 3: Explosión de Rendimiento (Rol: Senior ETL)
+
+* **Modo:** `PARALLEL_INITIAL` (Arranca todos los procesos al mismo tiempo exacto).
+* **El Caso Real:** Cierre de fin de mes. Hay que consolidar los cálculos de ventas de 4 regiones masivas (Norte, Sur, Este, Oeste). Hacerlo uno por uno toma demasiado tiempo.
+* **¿Para qué sirve?:** Inyecta toda la carga directamente a los procesadores del servidor (CPU) para que resuelvan todo en paralelo, reduciendo el tiempo de ejecución a una fracción del original.
+
+**Ejecución (Simulamos cálculos pesados de 4 segundos cada uno):**
+
+```sql
+SELECT bg.launch_job_one_shot(
+    '03_CIERRE_REGIONAL_ETL', 
+    'PARALLEL_INITIAL', 
+    ARRAY[
+        'SELECT pg_sleep(4); -- Procesando Región Norte',
+        'SELECT pg_sleep(4); -- Procesando Región Sur',
+        'SELECT pg_sleep(4); -- Procesando Región Este',
+        'SELECT pg_sleep(4); -- Procesando Región Oeste'
+    ]
+);
+
+```
+
+**🔍 Cómo Validarlo (Auditoría Visual en Vivo):**
+
+* Ejecute la vista de estatus varias veces rápidas durante los primeros 4 segundos:
+*(Observará `Workers Activos: 4`. En exactamente 4 segundos de reloj real, las 4 tareas marcarán éxito al mismo tiempo. El paralelismo es absoluto).*
+
+---
+
+## 🚦 ESCENARIO 4: El Administrador de Tráfico (Rol: Data Engineer)
+
+* **Modo:** `RANDOM` con límite `p_max_parallel_processes`.
+* **El Caso Real:** El sistema debe importar 6 archivos CSV gigantescos. Si el ingeniero los lanza todos en paralelo (`PARALLEL_INITIAL`), el servidor consumirá el 100% de la memoria RAM y colapsará el sistema de ventas de la empresa.
+* **¿Para qué sirve?:** Usted define una "válvula de seguridad". Si el límite es 2, el orquestador toma 2 archivos, los procesa y mantiene a los otros 4 dormidos. Conforme uno termina, inyecta el siguiente sin asfixiar la RAM.
+
+**Ejecución:**
+
+```sql
+SELECT bg.launch_job_one_shot(
+    '04_CARGA_MASIVA_CONTROLADA', 
+    'RANDOM', 
+    ARRAY[
+        'SELECT pg_sleep(3);', 'SELECT pg_sleep(3);', 'SELECT pg_sleep(3);', 
+        'SELECT pg_sleep(3);', 'SELECT pg_sleep(3);', 'SELECT pg_sleep(3);'
+    ],
+    p_max_parallel_processes => 2 -- VÁLVULA DE SEGURIDAD
+);
+
+```
+
+**🔍 Cómo Validarlo (Auditoría del Embudo):**
+
+* Ejecute el tablero de control cada segundo:
+*(Comprobará empíricamente que "Workers Activos" nunca sube de 2, y "En Espera" irá bajando rítmicamente. El proceso entero tomará 9 segundos reales (3 bloques de 3 segundos)).*
+
+---
+
+## 🔪 ESCENARIO 5: El Verdugo Inquebrantable (Rol: DBA)
+
+* **El Caso Real:** Un analista junior ejecuta un reporte mal diseñado (un producto cartesiano infinito) que seca la CPU. Las ventas están detenidas y nadie sabe qué pasa.
+* **¿Para qué sirve?:** El framework no confía en nadie. Si usted le pone un límite de vida (timeout) de 2 segundos, el Orquestador Padre asesina el proceso rebelde a nivel de Sistema Operativo, liberando la CPU automáticamente sin intervención humana.
+
+**Ejecución:**
+
+```sql
+SELECT bg.launch_job_one_shot(
+    '05_REPORTE_ANALISTA_JUNIOR', 
+    'SEQUENTIAL_NORMAL', 
+    ARRAY[
+        'WITH RECURSIVE t(n) AS (VALUES (1) UNION ALL SELECT n+1 FROM t) SELECT count(*) FROM t; -- Bucle infinito real'
+    ],
+    p_timeout_seconds => 2, -- MATAR SI EXCEDE 2 SEGUNDOS
+    p_max_retries => 0
+);
+
+```
+
+**🔍 Cómo Validarlo (Auditoría Forense):**
+
+* Espere 3 segundos y consulte la cola de tareas:
+```sql
+SELECT status, error_log FROM bg.run_tasks ORDER BY run_id DESC LIMIT 1;
+
+```
+
+
+*(Verá Estatus `FAILED` y la razón exacta: "Aniquilado por el Padre (Timeout estricto)". El analista fue detenido en seco).*
+
+---
+
+## 💥 ESCENARIO 6: Ingesta Masiva y Pruebas de Estrés (Rol: QA Automático)
+
+* **El Caso Real:** Mañana hay una campaña de "Venta Nocturna". El equipo de QA necesita simular a 100 sensores o clientes insertando datos al mismo tiempo para ver si los índices de la tabla soportan la presión.
+* **¿Para qué sirve?:** La función `bg.replicate_query()` clona una consulta instantáneamente en la memoria RAM. Evita escribir 100 líneas de código y elimina el error humano del copiar y pegar.
+
+**Ejecución (Simulamos 100 inserciones simultáneas en 1 sola línea):**
+
+```sql
+SELECT bg.launch_job_one_shot(
+    '06_PRUEBA_ESTRES_IOT', 
+    'PARALLEL_INITIAL', -- Lanzar las 100 al mismo tiempo
+    
+    bg.replicate_query(
+        'INSERT INTO bg_lab.iot_sensores_log (sensor_id, lectura) VALUES (FLOOR(RANDOM()*1000), RANDOM()*100);', 
+        100 -- Número de clones atómicos
+    ),
+    
+    p_timeout_seconds => 60,
+    p_max_retries => 0
+);
+
+```
+
+**🔍 Cómo Validarlo (Auditoría de Estrés):**
+
+1. **El Tablero:** Verá el Job `06_PRUEBA_ESTRES_IOT` finalizado en microsegundos con "Total Tareas: 100".
+2. **Los Datos Reales:**
+```sql
+SELECT COUNT(*) AS total_lecturas FROM bg_lab.iot_sensores_log;
+
+```
+
+
+*(El conteo dirá exactamente `100`. Usted acaba de inyectar y orquestar una prueba masiva sin ensuciar su editor SQL).*
+
+
+
+---
+
+## 📜 ESCENARIO 8: Inmutabilidad Histórica (El Caso Juan y Roberto)
+
+* **La Crisis Real:** Juan crea un Job. Roberto lo ejecuta en enero. En febrero, Juan actualiza el Job y le borra 2 pasos. Al consultar los reportes de enero, la base de datos truena por errores de "Llaves Foráneas" o muestra datos históricos falseados (modificados por el cambio de febrero).
+* **Para qué sirve este modo:** El framework usa **Snapshots Desacoplados**. Cada ejecución es una fotografía congelada en el tiempo. Usted puede reescribir y alterar las plantillas (`def_jobs`) 100 veces, y las bitácoras históricas jamás se corromperán.
+
+**Ejecución:**
+
+```sql
+-- 1. Se define la plantilla (Día 1)
+SELECT bg.create_job_definition('06_CIERRE_CAJA', 'SEQUENTIAL_NORMAL', ARRAY['SELECT pg_sleep(1);']);
+
+-- 2. Se lanza el Job (Queda en el historial con 1 tarea)
+SELECT bg.launch_job_by_name('06_CIERRE_CAJA');
+
+-- 3. Se RE-ESCRIBE la plantilla atómicamente agregando más carga (Día 2)
+SELECT bg.create_job_definition('06_CIERRE_CAJA', 'SEQUENTIAL_NORMAL', ARRAY['SELECT pg_sleep(1);', 'SELECT pg_sleep(1);', 'SELECT pg_sleep(1);']);
+
+-- 4. Se lanza la nueva versión
+SELECT bg.launch_job_by_name('06_CIERRE_CAJA');
+
+```
+
+**🔍 Cómo Validarlo (Auditoría):**
+
+* Revise el tablero filtrando por ese nombre. Verá dos registros con el mismo nombre de Job, pero uno indica `Total Tareas: 3` y debajo de él en la historia, el registro viejo intacto marca `Total Tareas: 1`.
+
+
+
+
+## 🏛️ ESCENARIO 9: El Salvavidas contra Micro-Cortes (Rol: Ingeniero de Integración)
+
+* **La Crisis Real:** Todos los días a las 6:00 AM, su base de datos se conecta al servidor del Banco Central mediante un `dblink` (o un Foreign Data Wrapper) para extraer el tipo de cambio del dólar. El problema es que el servidor del banco es inestable; a veces tiene "micro-cortes" de red que duran un par de segundos. Si su sistema lo intenta solo una vez y falla, los reportes financieros del día saldrán en ceros.
+* **¿Para qué sirve `p_max_retries`?:** Le dice al Padre Orquestador: *"Si el hijo fracasa por un error de red, un bloqueo de tabla o un timeout, no lo mates definitivamente. Límpialo, devuélvelo a la cola de pendientes y dale otra oportunidad (hasta N veces) antes de rendirte"*.
+
+**Ejecución (Simulamos un fallo de red usando división por cero):**
+En esta prueba, le diremos al orquestador que tiene derecho a **3 reintentos**. Como el error es matemático (`1/0`), va a fallar inevitablemente, pero nos servirá para auditar cómo el sistema agota todas sus oportunidades antes de rendirse.
+
+```sql
+SELECT bg.launch_job_one_shot(
+    '08_SINCRONIZACION_TIPO_CAMBIO', 
+    'SEQUENTIAL_NORMAL', 
+    ARRAY[
+        'SELECT 1 / 0; -- Simulamos la caída temporal del servidor del Banco'
+    ],
+    p_timeout_seconds => 5,
+    p_max_retries => 3 -- 🚀 EL SALVAVIDAS: 1 intento original + 3 reintentos
+);
+
+```
+
+**🔍 Cómo Validarlo (Auditoría de Persistencia):**
+
+Para ver la magia del reintento en acción, espere un par de segundos y consulte el nivel de detalle de las tareas. Queremos ver la columna **`attempt`** (intento):
+
+```sql
+SELECT 
+    run_task_id, 
+    status, 
+    attempt AS "Intento Actual", 
+    error_log 
+FROM bg.run_tasks 
+ORDER BY run_id DESC LIMIT 1;
+
+```
+
+**📊 El Resultado que verá en su pantalla:**
+
+* **Intento Actual:** `4` *(El intento 1 original + los 3 reintentos que usted autorizó).*
+* **Status:** `FAILED` *(Porque agotó todas sus vidas).*
+* **Error Log:** `division by zero`
+
+### 💡 ¿Por qué esto es oro puro en Producción?
+
+Si estuviéramos en un escenario real, digamos que en el **Intento 1** y **Intento 2** la red del banco estaba caída, el error se registraría, pero la tarea volvería a `PENDING`. Si en el **Intento 3** la red del banco se restablece, la tarea pasaría a `SUCCESS` y el Job entero se salvaría.
+
+El DBA no tuvo que despertarse a las 6:00 AM a reiniciar el proceso manualmente; **el framework tuvo la inteligencia de auto-recuperarse.**
