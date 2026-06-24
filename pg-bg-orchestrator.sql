@@ -1,42 +1,40 @@
 -- ============================================================================
--- FRAMEWORK CORPORATIVO DE ORQUESTACIÓN ASÍNCRONA RESILIENTE (FOAR) 
--- EDICIÓN: Diamante (Producción Definitiva - Secured)
--- ARQUITECTURA: Procedure-Based + RAM Arrays + Zero-Subtransaction Lock
--- SEGURIDAD: Revoke PUBLIC + Search Path Hijacking Protection
--- COMPATIBILIDAD: PostgreSQL 10+ (MD5 Nativo)
+-- ASYNCHRONOUS RESILIENT ORCHESTRATION FRAMEWORK (AROF) 
+-- EDITION: Diamond (Production Ready - Secured)
+-- ARCHITECTURE: Procedure-Based + RAM Arrays + Zero-Subtransaction Lock
+-- SECURITY: Revoke PUBLIC + Search Path Hijacking Protection
+-- COMPATIBILITY: PostgreSQL 10+ (Native MD5)
 -- ============================================================================
 
 BEGIN;
 
 -- ----------------------------------------------------------------------------
--- FASE 1: Extensiones, Esquema y Enums
+-- PHASE 1: Extensions, Schema and Enums
 -- ----------------------------------------------------------------------------
 
 -- ============================================================================
--- EXTENSIÓN Y ESQUEMA
--- ¿Qué es?: Son los cimientos de nuestra herramienta. "pg_background" es un 
---           complemento de la base de datos, y "bg" es como una carpeta o cajón.
--- ¿Para qué sirve?: El complemento permite que la base de datos haga múltiples 
---                   tareas "de fondo" sin congelar la pantalla del usuario. El 
---                   esquema ("bg") sirve para guardar todo nuestro código ahí 
---                   y no revolverlo con las tablas y datos del negocio del cliente.
+-- EXTENSION AND SCHEMA
+-- What is it?: These are the foundations of our tool. "pg_background" is a 
+--            database extension, and "bg" is the dedicated schema (namespace).
+-- What is it for?: The extension allows the DB to run multiple tasks in the 
+--                  background without freezing the user's screen. The schema 
+--                  keeps our code isolated from the client's business tables.
 -- ============================================================================
 CREATE EXTENSION IF NOT EXISTS pg_background;
 CREATE SCHEMA IF NOT EXISTS bg;
 
 -- ============================================================================
--- TIPOS DE ESTADO (ENUMS)
--- ¿Qué son?: Son diccionarios con palabras permitidas que el sistema usa.
--- ¿Para qué sirven?: 
---   * execution_mode: Le dice al sistema cómo ejecutar el trabajo (Uno por uno, 
---                     concurrente ordenado en piscina, o concurrente al azar).
---   * run_status: Indica cómo va un trabajo general (Iniciando, Corriendo, Terminado).
---   * task_status: Indica cómo le fue a una tarea pequeña (Pendiente, Éxito, Fallo).
+-- STATE TYPES (ENUMS)
+-- What are they?: Dictionaries with permitted keywords for the system.
+-- What are they for?: 
+--   * execution_mode: Tells the system how to run the job (Sequential, Pool, etc).
+--   * run_status: High-level status of a general job (Running, Completed, etc).
+--   * task_status: Low-level status of a single step (Pending, Success, Failed).
 -- ============================================================================
 DO $$ 
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'execution_mode' AND typnamespace = 'bg'::regnamespace) THEN
-        -- 🚀 ACTUALIZACIÓN: Se renombra 'PARALLEL_INITIAL' a 'CONCURRENT_ORDERED' para total claridad técnica
+        -- 🚀 UPDATE: 'PARALLEL_INITIAL' renamed to 'CONCURRENT_ORDERED' for technical clarity
         CREATE TYPE bg.execution_mode AS ENUM ('SEQUENTIAL_STRICT', 'SEQUENTIAL_NORMAL', 'CONCURRENT_ORDERED', 'RANDOM');
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'run_status' AND typnamespace = 'bg'::regnamespace) THEN
@@ -48,29 +46,27 @@ BEGIN
 END $$;
 
 -- ----------------------------------------------------------------------------
--- FASE 2: Persistencia Inmutable y Desacoplada
+-- PHASE 2: Immutable and Decoupled Persistence
 -- ----------------------------------------------------------------------------
 
 -- ============================================================================
--- TABLA: bg.cat_queries (Catálogo de Consultas)
--- ¿Qué es?: Es la biblioteca central donde se guardan los textos (SQL) a ejecutar.
--- ¿Para qué sirve?: En lugar de guardar 1,000 veces la misma instrucción en el 
---                   historial, el sistema la guarda aquí una sola vez usando una 
---                   "huella digital" (MD5). Su tarea es ahorrar mucho espacio.
+-- TABLE: bg.cat_queries (Query Catalog)
+-- What is it?: Central library storing the raw SQL texts to be executed.
+-- What is it for?: Instead of storing the same 1,000 queries repeatedly, the 
+--                  system deduplicates them using an MD5 hash. Saves space.
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS bg.cat_queries (
     query_id SERIAL PRIMARY KEY,
-    query_hash VARCHAR(32) UNIQUE NOT NULL, -- Reducido a 32 caracteres para MD5
+    query_hash VARCHAR(32) UNIQUE NOT NULL, -- Capped at 32 chars for MD5
     query_text TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CLOCK_TIMESTAMP()
 );
 
 -- ============================================================================
--- TABLA: bg.def_jobs (Plantillas de Trabajos)
--- ¿Qué es?: Es el manual de reglas generales para un trabajo (Job).
--- ¿Para qué sirve?: Aquí se anota el nombre del trabajo, cuánto tiempo máximo 
---                   tiene permitido tardar, si se debe reintentar en caso de 
---                   fallo, y cuántos procesos simultáneos se le permiten usar.
+-- TABLE: bg.def_jobs (Job Templates)
+-- What is it?: The master blueprint for a general Job.
+-- What is it for?: Defines the job name, timeout limits, max retries, and 
+--                  the maximum allowed parallel processes (safety valve).
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS bg.def_jobs (
     job_id SERIAL PRIMARY KEY,
@@ -84,10 +80,9 @@ CREATE TABLE IF NOT EXISTS bg.def_jobs (
 );
 
 -- ============================================================================
--- TABLA: bg.def_tasks (Lista de Pasos)
--- ¿Qué es?: Es la receta que dice qué pasos pertenecen a qué trabajo.
--- ¿Para qué sirve?: Su tarea es decirle al sistema: "Para el trabajo X, primero 
---                   ejecuta esta consulta, luego esta otra, y en este orden exacto".
+-- TABLE: bg.def_tasks (Task Steps)
+-- What is it?: The recipe linking queries to a specific Job.
+-- What is it for?: Instructs the orchestrator on the exact execution order.
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS bg.def_tasks (
     task_id SERIAL PRIMARY KEY,
@@ -98,11 +93,10 @@ CREATE TABLE IF NOT EXISTS bg.def_tasks (
 );
 
 -- ============================================================================
--- TABLA: bg.run_jobs (Historial de Trabajos)
--- ¿Qué es?: Es la bitácora o libro de registro principal.
--- ¿Para qué sirve?: Su tarea es anotar cada vez que alguien "le da play" a un 
---                   trabajo. Guarda a qué hora empezó, a qué hora terminó y 
---                   si todo el bloque salió bien o falló.
+-- TABLE: bg.run_jobs (Job Execution History)
+-- What is it?: The main execution logbook.
+-- What is it for?: Records every time a Job is triggered, storing start times, 
+--                  end times, and the final overarching status.
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS bg.run_jobs (
     run_id SERIAL PRIMARY KEY,
@@ -114,11 +108,10 @@ CREATE TABLE IF NOT EXISTS bg.run_jobs (
 );
 
 -- ============================================================================
--- TABLA: bg.run_tasks (Cola de Tareas en Vivo)
--- ¿Qué es?: Es la sala de espera y la hoja de calificaciones de cada pasito.
--- ¿Para qué sirve?: Lleva el control en tiempo real. Aquí el sistema anota qué 
---                   tarea está esperando (PENDING), cuál se está haciendo ahora 
---                   mismo (RUNNING) y si falló, anota el motivo exacto del error.
+-- TABLE: bg.run_tasks (Live Task Queue)
+-- What is it?: The waiting room and report card for every single step.
+-- What is it for?: Real-time queue tracking. Logs pending tasks, running tasks, 
+--                  and captures exact error messages if a failure occurs.
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS bg.run_tasks (
     run_task_id SERIAL PRIMARY KEY,
@@ -134,11 +127,10 @@ CREATE TABLE IF NOT EXISTS bg.run_tasks (
 );
 
 -- ============================================================================
--- TABLA: bg.run_tasks_errors_history (La Caja Negra Forense)
--- ¿Qué es?: Es el libro inmutable donde se guarda el historial real de fallos.
--- ¿Para qué sirve?: Su tarea es registrar minuciosamente cada cicatriz y error 
---                    antes de que el motor limpie la cola para un reintento. 
---                    Anota el estado, el intento y el texto exacto del SQL rebelde.
+-- TABLE: bg.run_tasks_errors_history (Forensic Black Box)
+-- What is it?: Immutable ledger archiving the true history of failures.
+-- What is it for?: Carefully records every scar and error before the engine 
+--                  clears the live queue for a retry. Archives status & SQL.
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS bg.run_tasks_errors_history (
     history_id SERIAL PRIMARY KEY,
@@ -153,24 +145,23 @@ CREATE TABLE IF NOT EXISTS bg.run_tasks_errors_history (
 );
 
 -- ============================================================================
--- ÍNDICES (Aceleradores)
--- ¿Qué son?: Son como el índice alfabético al final de un libro.
--- ¿Para qué sirven?: Le ayudan a la base de datos a encontrar la información 
---                    mucho más rápido sin tener que leer toda la tabla página por página.
+-- INDEXES (Accelerators)
+-- What are they?: Like the index at the back of a book.
+-- What are they for?: Helps the database find queue information instantly 
+--                     without scanning the entire table row by row.
 -- ============================================================================
 CREATE INDEX IF NOT EXISTS idx_cat_queries_hash ON bg.cat_queries(query_hash);
 CREATE INDEX IF NOT EXISTS idx_run_tasks_lookup ON bg.run_tasks(run_id, status);
 
 -- ----------------------------------------------------------------------------
--- FASE 3: Motores Base de Concurrencia (Lock-Free & Subtransaction-Free)
+-- PHASE 3: Base Concurrency Engines (Lock-Free & Subtransaction-Free)
 -- ----------------------------------------------------------------------------
 
 -- ============================================================================
--- FUNCIÓN: bg.register_query (El Recepcionista)
--- ¿Qué es?: Es una función que atiende las consultas nuevas.
--- ¿Para qué sirve?: Recibe el texto de una instrucción SQL, revisa si ya existe 
---                   en la biblioteca usando su huella digital (MD5). Si no existe, 
---                   la guarda. Finalmente, nos devuelve el ID de esa consulta.
+-- FUNCTION: bg.register_query (The Receptionist)
+-- What is it?: Registers new queries into the catalog.
+-- What is it for?: Receives raw SQL, checks if it already exists via MD5 hash. 
+--                  If it doesn't, it saves it. Returns the internal query ID.
 -- ============================================================================
 CREATE OR REPLACE FUNCTION bg.register_query(p_sql TEXT) RETURNS INT AS $$
 DECLARE v_id INT;
@@ -186,12 +177,10 @@ $$ LANGUAGE plpgsql SET search_path = bg, public, pg_temp;
 REVOKE EXECUTE ON FUNCTION bg.register_query(TEXT) FROM PUBLIC;
 
 -- ============================================================================
--- PROCEDIMIENTO: bg.bg_task_executor (El Obrero / Trabajador)
--- ¿Qué es?: Es el proceso que hace el trabajo pesado de cada paso.
--- ¿Para qué sirve?: Va a la tabla de tareas, avisa que ya empezó a trabajar 
---                   (cambiando su estado a RUNNING), ejecuta la instrucción 
---                   real que el usuario pidió y, al terminar, reporta si tuvo 
---                   éxito (SUCCESS) o anota el problema si falló (FAILED).
+-- PROCEDURE: bg.bg_task_executor (The Worker / Child Process)
+-- What is it?: The process executing the heavy lifting for each step.
+-- What is it for?: Flags the task as RUNNING, executes the actual SQL code, 
+--                  and reports back a SUCCESS or logs the FAILED message.
 -- ============================================================================
 CREATE OR REPLACE PROCEDURE bg.bg_task_executor(p_run_task_id INT) AS $$
 DECLARE 
@@ -220,13 +209,11 @@ $$ LANGUAGE plpgsql;
 REVOKE EXECUTE ON PROCEDURE bg.bg_task_executor(INT) FROM PUBLIC;
 
 -- ============================================================================
--- PROCEDIMIENTO: bg.bg_job_orchestrator (El Jefe / Supervisor)
--- ¿Qué es?: Es el cerebro principal que controla cuándo y cómo trabajan los obreros.
--- ¿Para qué sirve?: Su tarea es leer la lista de tareas pendientes, mandar llamar 
---                   a los trabajadores y vigilarlos con un reloj. Si un trabajador 
---                   se tarda más del tiempo permitido (timeout), este jefe lo despide 
---                   (lo cancela) para evitar que la base de datos se quede trabada.
---                   También se encarga de reintentar tareas si así se le ordenó.
+-- PROCEDURE: bg.bg_job_orchestrator (The Boss / Parent Process)
+-- What is it?: The main brain controlling when and how workers operate.
+-- What is it for?: Reads pending tasks, launches workers, and monitors them 
+--                  with a stopwatch. If a worker exceeds the timeout limit, 
+--                  it kills the process to prevent DB freezes. Handles retries.
 -- ============================================================================
 CREATE OR REPLACE PROCEDURE bg.bg_job_orchestrator(p_run_id INT) AS $$
 DECLARE
@@ -244,7 +231,7 @@ BEGIN
     INTO v_mode, v_timeout, v_max_retries, v_max_parallel
     FROM bg.run_jobs rj JOIN bg.def_jobs dj ON rj.job_id = dj.job_id WHERE rj.run_id = p_run_id;
 
-    -- LÓGICA 1: SECUENCIAL ESTRICTO / NORMAL
+    -- LOGIC 1: SEQUENTIAL STRICT / NORMAL
     IF v_mode IN ('SEQUENTIAL_STRICT', 'SEQUENTIAL_NORMAL') THEN
         v_task_list := ARRAY(SELECT run_task_id FROM bg.run_tasks WHERE run_id = p_run_id ORDER BY execution_order ASC);
         
@@ -262,12 +249,12 @@ BEGIN
 
                     IF EXTRACT(EPOCH FROM (pg_catalog.clock_timestamp() - v_task_start)) >= v_timeout THEN
                         PERFORM pg_catalog.pg_cancel_backend(v_child_pid); 
-                        UPDATE bg.run_tasks SET status = 'FAILED', ended_at = pg_catalog.clock_timestamp(), error_log = 'Aniquilado por el Padre (Timeout estricto)' WHERE run_task_id = v_run_task_id;
+                        UPDATE bg.run_tasks SET status = 'FAILED', ended_at = pg_catalog.clock_timestamp(), error_log = 'Killed by Parent (Strict Timeout)' WHERE run_task_id = v_run_task_id;
                         COMMIT; v_current_status := 'FAILED'; EXIT;
                     END IF;
 
                     IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE pid = v_child_pid AND backend_type = 'pg_background') THEN
-                        UPDATE bg.run_tasks SET status = 'FAILED', ended_at = pg_catalog.clock_timestamp(), error_log = 'Worker abortado por S.O.' WHERE run_task_id = v_run_task_id;
+                        UPDATE bg.run_tasks SET status = 'FAILED', ended_at = pg_catalog.clock_timestamp(), error_log = 'Worker aborted by OS' WHERE run_task_id = v_run_task_id;
                         COMMIT; v_current_status := 'FAILED'; EXIT;
                     END IF;
                 END LOOP;
@@ -288,7 +275,7 @@ BEGIN
             END LOOP;
         END LOOP;
 
-    -- LÓGICA 2: CONCURRENTE (Con separación de identidad de modos)
+    -- LOGIC 2: CONCURRENT (With mode identity separation)
     ELSE
         WHILE EXISTS (SELECT 1 FROM bg.run_tasks WHERE run_id = p_run_id AND status IN ('PENDING', 'RUNNING')) LOOP
             COMMIT; 
@@ -300,10 +287,10 @@ BEGIN
 
                 IF EXTRACT(EPOCH FROM (pg_catalog.clock_timestamp() - v_task_started_at)) >= v_timeout THEN
                     PERFORM pg_catalog.pg_cancel_backend(v_child_pid);
-                    UPDATE bg.run_tasks SET status = 'FAILED', ended_at = pg_catalog.clock_timestamp(), error_log = 'Aniquilado por el Padre (Timeout concurrente)' WHERE run_task_id = v_run_task_id;
+                    UPDATE bg.run_tasks SET status = 'FAILED', ended_at = pg_catalog.clock_timestamp(), error_log = 'Killed by Parent (Concurrent Timeout)' WHERE run_task_id = v_run_task_id;
                     COMMIT;
                 ELSIF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE pid = v_child_pid AND backend_type = 'pg_background') THEN
-                    UPDATE bg.run_tasks SET status = 'FAILED', ended_at = pg_catalog.clock_timestamp(), error_log = 'Worker concurrente abortado por S.O.' WHERE run_task_id = v_run_task_id;
+                    UPDATE bg.run_tasks SET status = 'FAILED', ended_at = pg_catalog.clock_timestamp(), error_log = 'Concurrent worker aborted by OS' WHERE run_task_id = v_run_task_id;
                     COMMIT;
                 END IF;
             END LOOP;
@@ -323,12 +310,12 @@ BEGIN
             WHILE v_active_slots < v_max_parallel LOOP
                 v_run_task_id := NULL; 
                 
-                -- 🚀 SEPARACIÓN DE COMPORTAMIENTOS
+                -- 🚀 SEPARATION OF BEHAVIORS
                 IF v_mode = 'RANDOM' THEN
-                    -- Extrae al azar para evadir contención de páginas e índices en disco
+                    -- Extract randomly to avoid disk page and index contention
                     SELECT run_task_id INTO v_run_task_id FROM bg.run_tasks WHERE run_id = p_run_id AND status = 'PENDING' ORDER BY RANDOM() LIMIT 1;
                 ELSE
-                    -- CONCURRENT_ORDERED: Extrae de forma secuencial y ordenada (Pool Ordenado)
+                    -- CONCURRENT_ORDERED: Extract sequentially (Ordered Pool)
                     SELECT run_task_id INTO v_run_task_id FROM bg.run_tasks WHERE run_id = p_run_id AND status = 'PENDING' ORDER BY execution_order ASC LIMIT 1;
                 END IF;
 
@@ -357,15 +344,14 @@ $$ LANGUAGE plpgsql;
 REVOKE EXECUTE ON PROCEDURE bg.bg_job_orchestrator(INT) FROM PUBLIC;
 
 -- ----------------------------------------------------------------------------
--- FASE 4: API de Alto Rendimiento (UPSERT y CTE)
+-- PHASE 4: High Performance API (UPSERT and CTEs)
 -- ----------------------------------------------------------------------------
 
 -- ============================================================================
--- FUNCIÓN: bg.create_job_definition (El Creador de Plantillas)
--- ¿Qué es?: Es la función que registra un nuevo proceso en el sistema.
--- ¿Para qué sirve?: Toma un nombre de trabajo (Job) y su lista de pasos. Si el 
---                   trabajo es nuevo, lo guarda. Si ya existía, lo actualiza 
---                   con los pasos más recientes de forma segura.
+-- FUNCTION: bg.create_job_definition (The Template Creator)
+-- What is it?: Function registering a new workflow in the system.
+-- What is it for?: Takes a job name and its task array. If it's new, it saves it. 
+--                  If it exists, it securely updates the latest steps.
 -- ============================================================================
 CREATE OR REPLACE FUNCTION bg.create_job_definition(
     p_job_name VARCHAR(100), p_mode bg.execution_mode, p_queries TEXT[], p_timeout_seconds INT DEFAULT 300, p_max_retries INT DEFAULT 0, p_max_parallel_processes INT DEFAULT 1
@@ -392,12 +378,10 @@ $$ LANGUAGE plpgsql SET search_path = bg, public, pg_temp;
 REVOKE EXECUTE ON FUNCTION bg.create_job_definition(VARCHAR, bg.execution_mode, TEXT[], INT, INT, INT) FROM PUBLIC;
 
 -- ============================================================================
--- FUNCIÓN: bg.start_job (El Botón de Encendido Interno)
--- ¿Qué es?: Es el gatillo que desencadena que un trabajo comience.
--- ¿Para qué sirve?: Su tarea es preparar la mesa: anota el nuevo trabajo en 
---                   el historial, pone todas sus tareas en la cola de "Pendientes" 
---                   y finalmente despierta al Jefe (Orquestador) para que 
---                   comience a repartir el trabajo en el fondo.
+-- FUNCTION: bg.start_job (The Internal Ignition Switch)
+-- What is it?: Trigger that sets a job into motion.
+-- What is it for?: Prepares the queue by setting all steps to PENDING, logs 
+--                  the execution, and wakes up the Orchestrator to begin work.
 -- ============================================================================
 CREATE OR REPLACE FUNCTION bg.start_job(p_job_id INT) RETURNS INT AS $$
 DECLARE v_run_id INT; v_mode bg.execution_mode;
@@ -419,17 +403,16 @@ $$ LANGUAGE plpgsql SET search_path = bg, public, pg_temp;
 REVOKE EXECUTE ON FUNCTION bg.start_job(INT) FROM PUBLIC;
 
 -- ============================================================================
--- FUNCIÓN: bg.launch_job_by_name (El Botón de Encendido Amigable)
--- ¿Qué es?: Es una forma fácil de arrancar un trabajo existente.
--- ¿Para qué sirve?: En lugar de obligar al operador a recordar el número (ID) 
---                   de un trabajo, le permite iniciarlo simplemente escribiendo 
---                   su nombre de texto (Ej. 'CIERRE_MES_CONTABLE').
+-- FUNCTION: bg.launch_job_by_name (The Friendly Ignition Switch)
+-- What is it?: Easy way to start an existing job.
+-- What is it for?: Allows operators to launch jobs using string names 
+--                  (e.g., 'MONTHLY_CLOSING') instead of remembering IDs.
 -- ============================================================================
 CREATE OR REPLACE FUNCTION bg.launch_job_by_name(p_job_name VARCHAR(100)) RETURNS INT AS $$
 DECLARE v_job_id INT;
 BEGIN
     SELECT job_id INTO v_job_id FROM bg.def_jobs WHERE job_name = p_job_name;
-    IF v_job_id IS NULL THEN RAISE EXCEPTION 'Job corporativo no encontrado.'; END IF;
+    IF v_job_id IS NULL THEN RAISE EXCEPTION 'Enterprise Job not found.'; END IF;
     RETURN bg.start_job(v_job_id);
 END;
 $$ LANGUAGE plpgsql SET search_path = bg, public, pg_temp;
@@ -437,10 +420,10 @@ $$ LANGUAGE plpgsql SET search_path = bg, public, pg_temp;
 REVOKE EXECUTE ON FUNCTION bg.launch_job_by_name(VARCHAR) FROM PUBLIC;
 
 -- ============================================================================
--- FUNCIÓN: bg.launch_job_one_shot (Todo en Uno)
--- ¿Qué es?: Es la herramienta de "crear y ejecutar" en un solo paso.
--- ¿Para qué sirve?: Junta los pasos de crear la plantilla e iniciarla de inmediato. 
---                   Es súper útil para hacer pruebas rápidas o tareas de una sola vez.
+-- FUNCTION: bg.launch_job_one_shot (All-in-One)
+-- What is it?: Create and execute tool in a single step.
+-- What is it for?: Combines template creation and ignition. Extremely useful 
+--                  for fast testing or one-off tasks.
 -- ============================================================================
 CREATE OR REPLACE FUNCTION bg.launch_job_one_shot(
     p_job_name VARCHAR(100), p_mode bg.execution_mode, p_queries TEXT[], p_timeout_seconds INT DEFAULT 300, p_max_retries INT DEFAULT 0, p_max_parallel_processes INT DEFAULT 1
@@ -455,12 +438,10 @@ $$ LANGUAGE plpgsql SET search_path = bg, public, pg_temp;
 REVOKE EXECUTE ON FUNCTION bg.launch_job_one_shot(VARCHAR, bg.execution_mode, TEXT[], INT, INT, INT) FROM PUBLIC;
 
 -- ============================================================================
--- FUNCIÓN: bg.replicate_query (La Fotocopiadora / Multiplicador)
--- ¿Qué es?: Es un clonador automático de consultas.
--- ¿Para qué sirve?: Si alguien quiere probar un proceso 500 veces para ver si 
---                   el servidor aguanta, en lugar de copiar y pegar 500 veces 
---                   la misma línea de texto, usa esta función. Le devuelve la 
---                   lista inmensa lista para trabajar al instante.
+-- FUNCTION: bg.replicate_query (The Cloner / Multiplier)
+-- What is it?: Automatic query cloning utility.
+-- What is it for?: Helps generate large arrays of the same query for stress 
+--                  testing without needing to copy-paste 500 times.
 -- ============================================================================
 CREATE OR REPLACE FUNCTION bg.replicate_query(
     p_query TEXT, 
@@ -468,10 +449,10 @@ CREATE OR REPLACE FUNCTION bg.replicate_query(
 ) RETURNS TEXT[] AS $$
 BEGIN
     IF p_times IS NULL OR p_times <= 0 THEN
-        RAISE EXCEPTION 'Error de Infraestructura: La cantidad de repeticiones debe ser mayor a cero (0).';
+        RAISE EXCEPTION 'Infrastructure Error: Replication count must be greater than zero (0).';
     END IF;
 
-    -- Función ultra-optimizada en memoria (Array Fill)
+    -- Ultra-optimized in-memory function (Array Fill)
     RETURN array_fill(p_query, ARRAY[p_times]);
 END;
 $$ LANGUAGE plpgsql IMMUTABLE SET search_path = bg, public, pg_temp; 
@@ -479,53 +460,52 @@ $$ LANGUAGE plpgsql IMMUTABLE SET search_path = bg, public, pg_temp;
 REVOKE EXECUTE ON FUNCTION bg.replicate_query(TEXT, INT) FROM PUBLIC;
 
 -- ----------------------------------------------------------------------------
--- FASE 5: Vista de Analítica Pre-Saneada
+-- PHASE 5: Pre-Sanitized Analytics Views
 -- ----------------------------------------------------------------------------
 
 -- ============================================================================
--- VISTA: bg.vw_status_progreso_corporativo (El Tablero de Control Visual)
--- ¿Qué es?: Es la pantalla tipo "semáforo" para los gerentes y supervisores.
--- ¿Para qué sirve?: Su tarea es de lectura. Convierte los logs transaccionales 
---                    en una barra de progreso que se llena dinámicamente con el 
---                    avance de la cola (Hechas + Errores), calculando el 100%.
+-- VIEW: bg.vw_status_progreso_corporativo (Visual Control Dashboard)
+-- What is it?: The "traffic light" monitoring screen for managers.
+-- What is it for?: Converts transactional logs into a dynamic progress bar 
+--                  tracking queue advancement (Completed + Errors).
 -- ============================================================================
 CREATE OR REPLACE VIEW bg.vw_status_progreso_corporativo AS
-WITH cte_metricas AS (
-    SELECT rt.run_id, COUNT(*) AS total, COUNT(*) FILTER (WHERE rt.status = 'SUCCESS') AS hechas, COUNT(*) FILTER (WHERE rt.status IN ('FAILED', 'KILLED')) AS errores, COUNT(*) FILTER (WHERE rt.status = 'PENDING') AS espera, COUNT(DISTINCT psa.pid) AS activos
+WITH cte_metrics AS (
+    SELECT rt.run_id, COUNT(*) AS total, COUNT(*) FILTER (WHERE rt.status = 'SUCCESS') AS completed, COUNT(*) FILTER (WHERE rt.status IN ('FAILED', 'KILLED')) AS errors, COUNT(*) FILTER (WHERE rt.status = 'PENDING') AS pending, COUNT(DISTINCT psa.pid) AS active_workers
     FROM bg.run_tasks rt
     LEFT JOIN pg_stat_activity psa ON rt.child_pid = psa.pid AND psa.backend_type = 'pg_background'
     GROUP BY rt.run_id
 ),
 cte_clean AS (
     SELECT rj.run_id, rj.status, rj.started_at, rj.ended_at, dj.job_name, dj.mode,
-           COALESCE(m.total, 0) AS total, COALESCE(m.hechas, 0) AS hechas, COALESCE(m.errores, 0) AS errores, COALESCE(m.espera, 0) AS espera, COALESCE(m.activos, 0) AS activos
+           COALESCE(m.total, 0) AS total, COALESCE(m.completed, 0) AS completed, COALESCE(m.errors, 0) AS errors, COALESCE(m.pending, 0) AS pending, COALESCE(m.active_workers, 0) AS active_workers
     FROM bg.run_jobs rj
     JOIN bg.def_jobs dj ON rj.job_id = dj.job_id
-    LEFT JOIN cte_metricas m ON rj.run_id = m.run_id
+    LEFT JOIN cte_metrics m ON rj.run_id = m.run_id
 )
 SELECT 
-    run_id AS "ID Ejecución", job_name AS "Nombre del Job", mode AS "Modo de Ejecución",
+    run_id AS "execution_id", job_name AS "job_name", mode AS "execution_mode",
     CASE 
-        WHEN mode = 'SEQUENTIAL_STRICT' AND errores > 0 THEN '❌ ABORTADO (FALLO ESTRICTO)'
-        WHEN total > 0 AND total = (hechas + errores) AND errores > 0 THEN '⚠️ FINALIZADO CON ERRORES'
-        WHEN total > 0 AND total = hechas THEN '✅ FINALIZADO'
-        WHEN activos > 0 THEN '🔥 EJECUTANDO (MOTOR ACTIVO)'
-        WHEN status = 'FAILED' THEN '❌ ERROR CRÍTICO DE MOTOR'
-        ELSE '⏳ EN ESPERA / INICIANDO'
-    END AS "Estatus Real",
-    total AS "Total Tareas", hechas AS "Hechas", errores AS "Errores", espera AS "En Espera", activos AS "Workers Activos (Motor)",
-    DATE_TRUNC('second', COALESCE(ended_at, CLOCK_TIMESTAMP()) - started_at) AS "Duración",
-    CASE WHEN total = 0 THEN '0%' ELSE ROUND(((hechas + errores)::FLOAT / total::FLOAT) * 100)::TEXT || '%' END AS "Avance %",
-    '[' || REPEAT('█', CASE WHEN total = 0 THEN 0 ELSE ROUND(((hechas + errores)::FLOAT / total::FLOAT) * 20)::INT END) || 
-    REPEAT('░', 20 - CASE WHEN total = 0 THEN 0 ELSE ROUND(((hechas + errores)::FLOAT / total::FLOAT) * 20)::INT END) || ']' AS "Línea de Progreso"
+        WHEN mode = 'SEQUENTIAL_STRICT' AND errors > 0 THEN '❌ ABORTED (STRICT FAILURE)'
+        WHEN total > 0 AND total = (completed + errors) AND errors > 0 THEN '⚠️ COMPLETED WITH ERRORS'
+        WHEN total > 0 AND total = completed THEN '✅ COMPLETED'
+        WHEN active_workers > 0 THEN '🔥 RUNNING (ENGINE ACTIVE)'
+        WHEN status = 'FAILED' THEN '❌ CRITICAL ENGINE ERROR'
+        ELSE '⏳ PENDING / INITIALIZING'
+    END AS "actual_status",
+    total AS "total_tasks", completed AS "completed", errors AS "errors", pending AS "pending", active_workers AS "active_workers",
+    DATE_TRUNC('second', COALESCE(ended_at, CLOCK_TIMESTAMP()) - started_at) AS "duration",
+    CASE WHEN total = 0 THEN '0%' ELSE ROUND(((completed + errors)::FLOAT / total::FLOAT) * 100)::TEXT || '%' END AS "progress_pct",
+    '[' || REPEAT('█', CASE WHEN total = 0 THEN 0 ELSE ROUND(((completed + errors)::FLOAT / total::FLOAT) * 20)::INT END) || 
+    REPEAT('░', 20 - CASE WHEN total = 0 THEN 0 ELSE ROUND(((completed + errors)::FLOAT / total::FLOAT) * 20)::INT END) || ']' AS "progress_bar"
 FROM cte_clean
 ORDER BY run_id DESC;
 
 -- ============================================================================
--- VISTA: bg.vw_trazabilidad_forense (Edición Pura)
--- ¿Qué es?: Registro de auditoría plana para desarrolladores y SysAdmins.
--- ¿Para qué sirve?: Mide milisegundos netos de ejecución y latencias de espera 
---                    en formato plano, compatible con consolas puras e indexación.
+-- VIEW: bg.vw_trazabilidad_forense (Pure Edition)
+-- What is it?: Plain text audit log designed for developers and SysAdmins.
+-- What is it for?: Measures net execution milliseconds and queue latencies 
+--                  in flat formats compatible with ORMs and automation tools.
 -- ============================================================================
 CREATE OR REPLACE VIEW bg.vw_trazabilidad_forense AS
 SELECT 
@@ -549,7 +529,7 @@ JOIN bg.cat_queries cq ON rt.query_id = cq.query_id
 ORDER BY rj.run_id DESC, rt.execution_order ASC;
 
 -- ----------------------------------------------------------------------------
--- FASE 6: Triggers de Auditoría Desacoplada
+-- PHASE 6: Decoupled Audit Triggers
 -- ----------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION bg.trg_archive_failed_attempt()
 RETURNS TRIGGER AS $$
@@ -576,14 +556,10 @@ BEFORE UPDATE ON bg.run_tasks
 FOR EACH ROW
 EXECUTE FUNCTION bg.trg_archive_failed_attempt();
 
-
-
-
-
 -- ============================================================================
--- FUNCIÓN: bg.abort_job (El Freno de Emergencia)
--- ¿Qué hace?: Busca un Job activo, envía una señal de muerte (SIGINT) al Padre 
---             y a todos los Hijos vivos, y marca la cola restante como KILLED.
+-- FUNCTION: bg.abort_job (The Emergency Brake / Kill Switch)
+-- What it does: Finds an active Job, sends a kill signal (SIGINT) to the Parent 
+--               and all live Children, and marks the remaining queue as KILLED.
 -- ============================================================================
 CREATE OR REPLACE FUNCTION bg.abort_job(p_job_name VARCHAR(500)) RETURNS TEXT AS $$
 DECLARE
@@ -594,68 +570,60 @@ DECLARE
     v_killed_children INT := 0;
     v_pending_aborted INT := 0;
 BEGIN
-    -- 1. Validar que el Job exista en el catálogo
+    -- 1. Validate Job exists in catalog
     SELECT job_id INTO v_job_id FROM bg.def_jobs WHERE job_name = p_job_name;
     IF v_job_id IS NULL THEN
-        RETURN '❌ ERROR: No se encontró el Job corporativo: ' || p_job_name;
+        RETURN '❌ ERROR: Enterprise Job not found: ' || p_job_name;
     END IF;
 
-    -- 2. Buscar la ejecución ACTIVA de ese Job
+    -- 2. Find the ACTIVE execution for that Job
     SELECT run_id, monitor_pid INTO v_run_id, v_parent_pid 
     FROM bg.run_jobs 
     WHERE job_id = v_job_id AND status IN ('INITIALIZING', 'RUNNING')
     ORDER BY run_id DESC LIMIT 1;
 
     IF v_run_id IS NULL THEN
-        RETURN '⚠️ AVISO: El Job [' || p_job_name || '] no tiene ninguna ejecución activa en este instante.';
+        RETURN '⚠️ WARNING: Job [' || p_job_name || '] has no active executions at this moment.';
     END IF;
 
-    -- 3. FASE DE ANIQUILACIÓN A: Matar a todos los hijos vivos
+    -- 3. ANNIHILATION PHASE A: Kill all live children
     FOR v_child_pid IN (SELECT child_pid FROM bg.run_tasks WHERE run_id = v_run_id AND status = 'RUNNING' AND child_pid IS NOT NULL)
     LOOP
         PERFORM pg_catalog.pg_cancel_backend(v_child_pid);
         v_killed_children := v_killed_children + 1;
     END LOOP;
 
-    -- 4. FASE DE ANIQUILACIÓN B: Matar al Padre Orquestador
+    -- 4. ANNIHILATION PHASE B: Kill the Parent Orchestrator
     IF v_parent_pid IS NOT NULL THEN
         PERFORM pg_catalog.pg_cancel_backend(v_parent_pid);
     END IF;
 
-    -- 5. FASE DE LIMPIEZA: Destruir la cola de tareas (Idempotencia)
+    -- 5. CLEANUP PHASE: Destroy the task queue (Idempotency)
     WITH updated_pending AS (
         UPDATE bg.run_tasks 
-        SET status = 'KILLED', error_log = 'abortado_manualmente' 
+        SET status = 'KILLED', error_log = 'manually_aborted' 
         WHERE run_id = v_run_id AND status = 'PENDING' 
         RETURNING 1
     ) SELECT COUNT(*) INTO v_pending_aborted FROM updated_pending;
 
-    -- Marcar los hijos que estaban corriendo como aniquilados
+    -- Mark running children as killed
     UPDATE bg.run_tasks 
-    SET status = 'KILLED', ended_at = pg_catalog.clock_timestamp(), error_log = 'abortado_manualmente_sigint' 
+    SET status = 'KILLED', ended_at = pg_catalog.clock_timestamp(), error_log = 'manually_aborted_sigint' 
     WHERE run_id = v_run_id AND status = 'RUNNING';
 
-    -- Marcar la cabecera del Job como fallida por intervención humana
+    -- Mark Job header as failed via human intervention
     UPDATE bg.run_jobs 
     SET status = 'FAILED', ended_at = pg_catalog.clock_timestamp() 
     WHERE run_id = v_run_id;
 
     RETURN pg_catalog.format(
-        '🛑 BOTÓN DE PÁNICO ACCIONADO: Job [%s] abortado. Trabajadores asesinados: %s. Tareas en cola destruidas: %s.', 
+        '🛑 PANIC BUTTON TRIGGERED: Job [%s] aborted. Killed workers: %s. Destroyed pending tasks: %s.', 
         p_job_name, v_killed_children, v_pending_aborted
     );
 END;
 $$ LANGUAGE plpgsql SET search_path = bg, public, pg_temp;
 
--- Seguridad restrictiva: Nadie externo debe poder apagar el motor
+-- Restrictive security: No external user should be able to shutdown the engine
 REVOKE EXECUTE ON FUNCTION bg.abort_job(VARCHAR) FROM PUBLIC;
-
-
-
-
-
-
-
-
 
 COMMIT;
