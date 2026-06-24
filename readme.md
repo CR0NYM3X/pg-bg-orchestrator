@@ -1,4 +1,4 @@
-# 🌟 pg-async-orchestrator (FOAR)
+# 🌟 pg-bg-orchestrator (FOAR)
 **Orquestación de tareas en segundo plano, nativa y amigable para PostgreSQL.** <br>
 **(FOAR) Framework de Orquestación Asíncrona Resiliente.**
 
@@ -6,7 +6,7 @@
 
 A veces necesitas ejecutar consultas pesadas, mantenimientos masivos o migraciones de datos. Si lo haces de forma tradicional, tu conexión se queda "pensando" (congelada) y te impide seguir trabajando o bloquea a otros usuarios. 
 
-Ahí es donde entra **`pg-async-orchestrator`**. Como su nombre lo indica, es un **Orquestador**. 
+Ahí es donde entra **`pg-bg-orchestrator`**. Como su nombre lo indica, es un **Orquestador**. 
 
 **¿Qué es un Orquestador?**
 Piensa en él como el director de una orquesta o un policía de tránsito para tu base de datos. No se limita simplemente a mandar las tareas al "fondo" (background), sino que toma el control total y de forma inteligente:
@@ -85,9 +85,9 @@ Tranquilidad operativa. El DBA puede irse a dormir sabiendo que, al revisar la b
 
 ### 📊 Análisis Comparativo del Ecosistema
 
-Para entender dónde encaja `pg-async-orchestrator`, es importante ver qué resuelve frente a otras soluciones del mercado. No reemplaza a un ecosistema multinube, pero brilla cuando tu carga de trabajo es puramente transaccional y reside en PostgreSQL.
+Para entender dónde encaja `pg-bg-orchestrator`, es importante ver qué resuelve frente a otras soluciones del mercado. No reemplaza a un ecosistema multinube, pero brilla cuando tu carga de trabajo es puramente transaccional y reside en PostgreSQL.
 
-| Capacidad Operativa | 💎 pg-async-orchestrator | `pg_cron` (Extensión) | `pgmq` / Colas SQL | Externas (Airflow / Celery) |
+| Capacidad Operativa | 💎 pg-bg-orchestrator | `pg_cron` (Extensión) | `pgmq` / Colas SQL | Externas (Airflow / Celery) |
 | --- | --- | --- | --- | --- |
 | **Disparador Principal** | Bajo demanda (Eventos/Instantáneo) | Basado en reloj (Horarios fijos) | Bajo demanda | Eventos, Horarios y APIs |
 | **Infraestructura Requerida** | **Cero** (100% Nativo en Postgres) | **Cero** (Nativo) | Requiere scripts externos para leer la cola | **Alta** (Servidores Python, Redis, DevOps) |
