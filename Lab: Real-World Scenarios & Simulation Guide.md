@@ -95,7 +95,7 @@ SELECT bg.launch_job_one_shot(
 
 **🔍 How to Validate (Audit):**
 
-1. **Orchestration Audit:** `SELECT * FROM bg.vw_status_progreso_corporativo WHERE job_name = '01_BANK_TRANSFER';`
+1. **Orchestration Audit:** `SELECT * FROM bg.vw_corporate_progress_status WHERE job_name = '01_BANK_TRANSFER';`
 *(You will see Status `❌ ABORTED (STRICT FAILURE)`. Completed: 1, Errors: 1, Pending: 1. The engine stopped dead in its tracks).*
 2. **Business Audit:** `SELECT * FROM bg_lab.bank_accounts;`
 *(You will see Supplier B still has $0.00. Money wasn't created out of thin air. The database is safe).*
@@ -129,7 +129,7 @@ SELECT bg.launch_job_one_shot(
 *(You will see `⚠️ COMPLETED WITH ERRORS`. Completed: 2, Errors: 1. Total transparency. The orchestrator waited for the IoT cleanup to finish, tried to drop the table and failed, and then sequentially cleaned the ETL staging).*
 
 ```sql
-SELECT * FROM bg.vw_status_progreso_corporativo WHERE job_name = '02_DBA_MAINTENANCE' ORDER BY execution_id DESC LIMIT 2;
+SELECT * FROM bg.vw_corporate_progress_status WHERE job_name = '02_DBA_MAINTENANCE' ORDER BY execution_id DESC LIMIT 2;
 
 SELECT * FROM bg_lab.bank_accounts;
 SELECT * FROM bg_lab.etl_sales_staging;
