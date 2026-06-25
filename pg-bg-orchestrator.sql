@@ -464,12 +464,12 @@ REVOKE EXECUTE ON FUNCTION bg.replicate_query(TEXT, INT) FROM PUBLIC;
 -- ----------------------------------------------------------------------------
 
 -- ============================================================================
--- VIEW: bg.vw_status_progreso_corporativo (Visual Control Dashboard)
+-- VIEW: bg.vw_corporate_progress_status (Visual Control Dashboard)
 -- What is it?: The "traffic light" monitoring screen for managers.
 -- What is it for?: Converts transactional logs into a dynamic progress bar 
 --                  tracking queue advancement (Completed + Errors).
 -- ============================================================================
-CREATE OR REPLACE VIEW bg.vw_status_progreso_corporativo AS
+CREATE OR REPLACE VIEW bg.vw_corporate_progress_status AS
 WITH cte_metrics AS (
     SELECT rt.run_id, COUNT(*) AS total, COUNT(*) FILTER (WHERE rt.status = 'SUCCESS') AS completed, COUNT(*) FILTER (WHERE rt.status IN ('FAILED', 'KILLED')) AS errors, COUNT(*) FILTER (WHERE rt.status = 'PENDING') AS pending, COUNT(DISTINCT psa.pid) AS active_workers
     FROM bg.run_tasks rt
