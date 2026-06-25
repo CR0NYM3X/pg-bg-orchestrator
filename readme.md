@@ -121,7 +121,7 @@ Don't worry, the system uses very simple tables and objects to keep track of eve
 
 **👁️ Views (For easy monitoring):**
 
-* `bg.vw_status_progreso_corporativo`: A highly readable, management-ready dashboard displaying progress percentage (%), active background workers, and automated progress bars.
+* `bg.vw_corporate_progress_status`: A highly readable, management-ready dashboard displaying progress percentage (%), active background workers, and automated progress bars.
 * `bg.vw_trazabilidad_forense`: **[NEW]** Pure textual view designed for DBAs, ORMs, and automation tooling. It measures net task duration, queue latency, and execution summaries with ms precision.
 
 **⚙️ Functions & Procedures (Your control room):**
