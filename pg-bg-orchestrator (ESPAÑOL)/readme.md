@@ -135,8 +135,21 @@ No te asustes, el sistema usa tablitas muy sencillas para llevar su propio contr
 * `bg.replicate_query()`: Te ayuda a clonar una consulta muchas veces para hacer pruebas de estrés.
 * `bg.abort_job()`: **[NUEVO]** El freno de emergencia global (Kill Switch). Intercepta un trabajo activo, envía una señal de cancelación (SIGINT) para detener al padre orquestador y a todos los trabajadores vivos a nivel del Sistema Operativo, y destruye la cola restante al instante.
 
+---
 
 
+futuras actualizaciones se tiene pensado ingregar temas de -- 
+```
+max_prepared_transactions -- para SEQUENTIAL_STRICT o agregar un nuevo modo.
+show max_prepared_transactions; -- permitira revertir todo en caso de algo mal pase,
+-- para esto el proceso 1 realiza su trabajo en una transaccion y genera el prepare con un id md5, si es exitoso, el proceso dos hace otro begin y genera otro perare , en caso de que el tercer proceso falle, el orquestador dejara de lanzar el siguiente proceso
+en caso de haber y ejecutara un rollback de todos los procesos.
+
+
+-- especificar que se pueden hacer acciones que no esperan una respuesa como filas, solo un mensaje de error exitoso o fallido.
+
+
+```
 
 
 
