@@ -208,12 +208,16 @@ $$ LANGUAGE plpgsql;
 
 REVOKE EXECUTE ON PROCEDURE bg.bg_task_executor(INT) FROM PUBLIC;
 
+
+
+
 -- ============================================================================
 -- PROCEDURE: bg.bg_job_orchestrator (The Boss / Parent Process)
 -- What is it?: The main brain controlling when and how workers operate.
 -- What is it for?: Reads pending tasks, launches workers, and monitors them 
 --                  with a stopwatch. If a worker exceeds the timeout limit, 
 --                  it kills the process to prevent DB freezes. Handles retries.
+-- SECURITY PATCH: Optimistic Locking applied to prevent Phantom Aborts.
 -- ============================================================================
 CREATE OR REPLACE PROCEDURE bg.bg_job_orchestrator(p_run_id INT) AS $$
 DECLARE
@@ -249,12 +253,16 @@ BEGIN
 
                     IF EXTRACT(EPOCH FROM (pg_catalog.clock_timestamp() - v_task_start)) >= v_timeout THEN
                         PERFORM pg_catalog.pg_cancel_backend(v_child_pid); 
-                        UPDATE bg.run_tasks SET status = 'FAILED', ended_at = pg_catalog.clock_timestamp(), error_log = 'Killed by Parent (Strict Timeout)' WHERE run_task_id = v_run_task_id;
+                        -- 🛡️ PARCHE APLICADO: Optimistic Locking en Modo Secuencial
+                        UPDATE bg.run_tasks SET status = 'FAILED', ended_at = pg_catalog.clock_timestamp(), error_log = 'Killed by Parent (Strict Timeout)' 
+                        WHERE run_task_id = v_run_task_id AND status = 'RUNNING';
                         COMMIT; v_current_status := 'FAILED'; EXIT;
                     END IF;
 
                     IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE pid = v_child_pid AND backend_type = 'pg_background') THEN
-                        UPDATE bg.run_tasks SET status = 'FAILED', ended_at = pg_catalog.clock_timestamp(), error_log = 'Worker aborted by OS' WHERE run_task_id = v_run_task_id;
+                        -- 🛡️ PARCHE APLICADO: Optimistic Locking en Modo Secuencial
+                        UPDATE bg.run_tasks SET status = 'FAILED', ended_at = pg_catalog.clock_timestamp(), error_log = 'Worker aborted by OS' 
+                        WHERE run_task_id = v_run_task_id AND status = 'RUNNING';
                         COMMIT; v_current_status := 'FAILED'; EXIT;
                     END IF;
                 END LOOP;
@@ -263,7 +271,9 @@ BEGIN
 
                 SELECT attempt INTO v_curr_attempt FROM bg.run_tasks WHERE run_task_id = v_run_task_id;
                 IF v_curr_attempt <= v_max_retries THEN
-                    UPDATE bg.run_tasks SET attempt = v_curr_attempt + 1, status = 'PENDING', error_log = NULL WHERE run_task_id = v_run_task_id;
+                    -- 🛡️ PARCHE APLICADO: Doble validación en reintentos
+                    UPDATE bg.run_tasks SET attempt = v_curr_attempt + 1, status = 'PENDING', error_log = NULL 
+                    WHERE run_task_id = v_run_task_id AND status = 'FAILED';
                     COMMIT;
                 ELSE
                     IF v_mode = 'SEQUENTIAL_STRICT' THEN
@@ -287,20 +297,33 @@ BEGIN
 
                 IF EXTRACT(EPOCH FROM (pg_catalog.clock_timestamp() - v_task_started_at)) >= v_timeout THEN
                     PERFORM pg_catalog.pg_cancel_backend(v_child_pid);
-                    UPDATE bg.run_tasks SET status = 'FAILED', ended_at = pg_catalog.clock_timestamp(), error_log = 'Killed by Parent (Concurrent Timeout)' WHERE run_task_id = v_run_task_id;
+                    -- 🛡️ PARCHE APLICADO: Bloqueo Optimista (Optimistic Locking) para Timeout Concurrente
+                    UPDATE bg.run_tasks SET status = 'FAILED', ended_at = pg_catalog.clock_timestamp(), error_log = 'Killed by Parent (Concurrent Timeout)' 
+                    WHERE run_task_id = v_run_task_id AND status = 'RUNNING';
                     COMMIT;
                 ELSIF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE pid = v_child_pid AND backend_type = 'pg_background') THEN
-                    UPDATE bg.run_tasks SET status = 'FAILED', ended_at = pg_catalog.clock_timestamp(), error_log = 'Concurrent worker aborted by OS' WHERE run_task_id = v_run_task_id;
+                    -- 🛡️ PARCHE APLICADO: Cierre de la condición de carrera (Phantom Abort)
+                    UPDATE bg.run_tasks SET status = 'FAILED', ended_at = pg_catalog.clock_timestamp(), error_log = 'Concurrent worker aborted by OS' 
+                    WHERE run_task_id = v_run_task_id AND status = 'RUNNING';
                     COMMIT;
                 END IF;
             END LOOP;
 
-            v_failed_list := ARRAY(SELECT run_task_id FROM bg.run_tasks WHERE run_id = p_run_id AND status = 'FAILED' AND error_log IS NOT NULL);
+            -- 🛡️ PARCHE APLICADO: Optimización Matemática de RAM y CPU (Filtrado estricto)
+            v_failed_list := ARRAY(
+                SELECT run_task_id FROM bg.run_tasks 
+                WHERE run_id = p_run_id 
+                AND status = 'FAILED' 
+                AND error_log IS NOT NULL 
+                AND attempt <= v_max_retries
+            );
             
             FOREACH v_run_task_id IN ARRAY v_failed_list LOOP
                 SELECT attempt INTO v_curr_attempt FROM bg.run_tasks WHERE run_task_id = v_run_task_id;
                 IF v_curr_attempt <= v_max_retries THEN
-                    UPDATE bg.run_tasks SET attempt = v_curr_attempt + 1, status = 'PENDING', error_log = NULL WHERE run_task_id = v_run_task_id;
+                    -- 🛡️ PARCHE APLICADO: Doble validación por seguridad concurrente
+                    UPDATE bg.run_tasks SET attempt = v_curr_attempt + 1, status = 'PENDING', error_log = NULL 
+                    WHERE run_task_id = v_run_task_id AND status = 'FAILED';
                     COMMIT;
                 END IF;
             END LOOP;
