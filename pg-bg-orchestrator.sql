@@ -75,6 +75,8 @@ CREATE TABLE IF NOT EXISTS bg.def_jobs (
     max_parallel_processes INT DEFAULT 1 CHECK (max_parallel_processes >= 1),
     timeout_seconds INT NOT NULL DEFAULT 300 CHECK (timeout_seconds > 0),
     max_retries INT NOT NULL DEFAULT 0 CHECK (max_retries >= 0),
+    allocation_policy VARCHAR(20) DEFAULT 'ADAPTIVE' CHECK (allocation_policy IN ('ADAPTIVE', 'STRICT')),
+    execution_notes TEXT,
     is_active BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMP DEFAULT CLOCK_TIMESTAMP()
 );
@@ -221,48 +223,63 @@ REVOKE EXECUTE ON PROCEDURE bg.bg_task_executor(INT) FROM PUBLIC;
 -- ============================================================================
 CREATE OR REPLACE PROCEDURE bg.bg_job_orchestrator(p_run_id INT) AS $$
 DECLARE
-    v_mode bg.execution_mode; v_timeout INT; v_max_retries INT; v_max_parallel INT;
+    v_mode bg.execution_mode; v_timeout INT; v_max_retries INT; v_max_parallel INT; v_allocation_policy VARCHAR;
     v_child_pid INT; v_current_status bg.task_status; v_curr_attempt INT;
     v_task_start TIMESTAMP; v_active_slots INT; v_run_task_id INT;
     v_task_list INT[]; v_running_list INT[]; v_failed_list INT[]; v_task_started_at TIMESTAMP;
+    v_launch_success BOOLEAN; v_throttled BOOLEAN := FALSE;
 BEGIN
     PERFORM pg_catalog.set_config('search_path', 'bg, public, pg_temp', false);
 
     UPDATE bg.run_jobs SET monitor_pid = pg_catalog.pg_backend_pid(), status = 'RUNNING', started_at = pg_catalog.clock_timestamp() WHERE run_id = p_run_id;
     COMMIT;
 
-    SELECT dj.mode, dj.timeout_seconds, dj.max_retries, dj.max_parallel_processes 
-    INTO v_mode, v_timeout, v_max_retries, v_max_parallel
+    -- LEEMOS LA POLÍTICA DEL CLIENTE
+    SELECT dj.mode, dj.timeout_seconds, dj.max_retries, dj.max_parallel_processes, dj.allocation_policy
+    INTO v_mode, v_timeout, v_max_retries, v_max_parallel, v_allocation_policy
     FROM bg.run_jobs rj JOIN bg.def_jobs dj ON rj.job_id = dj.job_id WHERE rj.run_id = p_run_id;
 
-    -- LOGIC 1: SEQUENTIAL STRICT / NORMAL
     IF v_mode IN ('SEQUENTIAL_STRICT', 'SEQUENTIAL_NORMAL') THEN
         v_task_list := ARRAY(SELECT run_task_id FROM bg.run_tasks WHERE run_id = p_run_id ORDER BY execution_order ASC);
-        
         FOREACH v_run_task_id IN ARRAY v_task_list LOOP
             WHILE TRUE LOOP
-                SELECT public.pg_background_launch(pg_catalog.format('CALL bg.bg_task_executor(%L)', v_run_task_id)) INTO v_child_pid;
+                v_launch_success := TRUE;
+                BEGIN
+                    SELECT public.pg_background_launch(pg_catalog.format('CALL bg.bg_task_executor(%L)', v_run_task_id)) INTO v_child_pid;
+                EXCEPTION WHEN OTHERS THEN
+                    v_launch_success := FALSE;
+                END;
+
+                IF NOT v_launch_success THEN
+                    IF v_allocation_policy = 'STRICT' THEN
+                        -- FAIL-FAST MODO STRICT
+                        UPDATE bg.run_jobs SET status = 'FAILED', ended_at = pg_catalog.clock_timestamp(), execution_notes = '🛑 ABORTED: Hardware slot limit reached under STRICT policy.' WHERE run_id = p_run_id;
+                        UPDATE bg.run_tasks SET status = 'KILLED', error_log = 'Hardware capacity abort' WHERE run_id = p_run_id AND status = 'PENDING';
+                        COMMIT; RETURN;
+                    ELSE
+                        -- AVISO MODO ADAPTIVE
+                        IF NOT v_throttled THEN
+                            UPDATE bg.run_jobs SET execution_notes = '⚠️ ADAPTIVE: Running in degraded mode. Hardware slots saturated.' WHERE run_id = p_run_id;
+                            v_throttled := TRUE;
+                        END IF;
+                        COMMIT; PERFORM pg_catalog.pg_sleep(0.5); CONTINUE; 
+                    END IF;
+                END IF;
+
                 v_task_start := pg_catalog.clock_timestamp(); 
-                
                 WHILE TRUE LOOP
-                    COMMIT; 
-                    PERFORM pg_catalog.pg_sleep(0.5); 
-                    
+                    COMMIT; PERFORM pg_catalog.pg_sleep(0.5); 
                     SELECT status INTO v_current_status FROM bg.run_tasks WHERE run_task_id = v_run_task_id;
                     IF v_current_status IN ('SUCCESS', 'FAILED') THEN EXIT; END IF;
 
                     IF EXTRACT(EPOCH FROM (pg_catalog.clock_timestamp() - v_task_start)) >= v_timeout THEN
                         PERFORM pg_catalog.pg_cancel_backend(v_child_pid); 
-                        -- 🛡️ PARCHE APLICADO: Optimistic Locking en Modo Secuencial
-                        UPDATE bg.run_tasks SET status = 'FAILED', ended_at = pg_catalog.clock_timestamp(), error_log = 'Killed by Parent (Strict Timeout)' 
-                        WHERE run_task_id = v_run_task_id AND status = 'RUNNING';
+                        UPDATE bg.run_tasks SET status = 'FAILED', ended_at = pg_catalog.clock_timestamp(), error_log = 'Killed by Parent (Strict Timeout)' WHERE run_task_id = v_run_task_id AND status = 'RUNNING';
                         COMMIT; v_current_status := 'FAILED'; EXIT;
                     END IF;
 
                     IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE pid = v_child_pid AND backend_type = 'pg_background') THEN
-                        -- 🛡️ PARCHE APLICADO: Optimistic Locking en Modo Secuencial
-                        UPDATE bg.run_tasks SET status = 'FAILED', ended_at = pg_catalog.clock_timestamp(), error_log = 'Worker aborted by OS' 
-                        WHERE run_task_id = v_run_task_id AND status = 'RUNNING';
+                        UPDATE bg.run_tasks SET status = 'FAILED', ended_at = pg_catalog.clock_timestamp(), error_log = 'Worker aborted by OS' WHERE run_task_id = v_run_task_id AND status = 'RUNNING';
                         COMMIT; v_current_status := 'FAILED'; EXIT;
                     END IF;
                 END LOOP;
@@ -271,9 +288,7 @@ BEGIN
 
                 SELECT attempt INTO v_curr_attempt FROM bg.run_tasks WHERE run_task_id = v_run_task_id;
                 IF v_curr_attempt <= v_max_retries THEN
-                    -- 🛡️ PARCHE APLICADO: Doble validación en reintentos
-                    UPDATE bg.run_tasks SET attempt = v_curr_attempt + 1, status = 'PENDING', error_log = NULL 
-                    WHERE run_task_id = v_run_task_id AND status = 'FAILED';
+                    UPDATE bg.run_tasks SET attempt = v_curr_attempt + 1, status = 'PENDING', error_log = NULL WHERE run_task_id = v_run_task_id AND status = 'FAILED';
                     COMMIT;
                 ELSE
                     IF v_mode = 'SEQUENTIAL_STRICT' THEN
@@ -285,45 +300,29 @@ BEGIN
             END LOOP;
         END LOOP;
 
-    -- LOGIC 2: CONCURRENT (With mode identity separation)
     ELSE
         WHILE EXISTS (SELECT 1 FROM bg.run_tasks WHERE run_id = p_run_id AND status IN ('PENDING', 'RUNNING')) LOOP
             COMMIT; 
             
             v_running_list := ARRAY(SELECT run_task_id FROM bg.run_tasks WHERE run_id = p_run_id AND status = 'RUNNING');
-            
             FOREACH v_run_task_id IN ARRAY v_running_list LOOP
                 SELECT child_pid, started_at INTO v_child_pid, v_task_started_at FROM bg.run_tasks WHERE run_task_id = v_run_task_id;
 
                 IF EXTRACT(EPOCH FROM (pg_catalog.clock_timestamp() - v_task_started_at)) >= v_timeout THEN
                     PERFORM pg_catalog.pg_cancel_backend(v_child_pid);
-                    -- 🛡️ PARCHE APLICADO: Bloqueo Optimista (Optimistic Locking) para Timeout Concurrente
-                    UPDATE bg.run_tasks SET status = 'FAILED', ended_at = pg_catalog.clock_timestamp(), error_log = 'Killed by Parent (Concurrent Timeout)' 
-                    WHERE run_task_id = v_run_task_id AND status = 'RUNNING';
+                    UPDATE bg.run_tasks SET status = 'FAILED', ended_at = pg_catalog.clock_timestamp(), error_log = 'Killed by Parent (Concurrent Timeout)' WHERE run_task_id = v_run_task_id AND status = 'RUNNING';
                     COMMIT;
                 ELSIF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE pid = v_child_pid AND backend_type = 'pg_background') THEN
-                    -- 🛡️ PARCHE APLICADO: Cierre de la condición de carrera (Phantom Abort)
-                    UPDATE bg.run_tasks SET status = 'FAILED', ended_at = pg_catalog.clock_timestamp(), error_log = 'Concurrent worker aborted by OS' 
-                    WHERE run_task_id = v_run_task_id AND status = 'RUNNING';
+                    UPDATE bg.run_tasks SET status = 'FAILED', ended_at = pg_catalog.clock_timestamp(), error_log = 'Concurrent worker aborted by OS' WHERE run_task_id = v_run_task_id AND status = 'RUNNING';
                     COMMIT;
                 END IF;
             END LOOP;
 
-            -- 🛡️ PARCHE APLICADO: Optimización Matemática de RAM y CPU (Filtrado estricto)
-            v_failed_list := ARRAY(
-                SELECT run_task_id FROM bg.run_tasks 
-                WHERE run_id = p_run_id 
-                AND status = 'FAILED' 
-                AND error_log IS NOT NULL 
-                AND attempt <= v_max_retries
-            );
-            
+            v_failed_list := ARRAY(SELECT run_task_id FROM bg.run_tasks WHERE run_id = p_run_id AND status = 'FAILED' AND error_log IS NOT NULL AND attempt <= v_max_retries);
             FOREACH v_run_task_id IN ARRAY v_failed_list LOOP
                 SELECT attempt INTO v_curr_attempt FROM bg.run_tasks WHERE run_task_id = v_run_task_id;
                 IF v_curr_attempt <= v_max_retries THEN
-                    -- 🛡️ PARCHE APLICADO: Doble validación por seguridad concurrente
-                    UPDATE bg.run_tasks SET attempt = v_curr_attempt + 1, status = 'PENDING', error_log = NULL 
-                    WHERE run_task_id = v_run_task_id AND status = 'FAILED';
+                    UPDATE bg.run_tasks SET attempt = v_curr_attempt + 1, status = 'PENDING', error_log = NULL WHERE run_task_id = v_run_task_id AND status = 'FAILED';
                     COMMIT;
                 END IF;
             END LOOP;
@@ -333,22 +332,48 @@ BEGIN
             WHILE v_active_slots < v_max_parallel LOOP
                 v_run_task_id := NULL; 
                 
-                -- 🚀 SEPARATION OF BEHAVIORS
                 IF v_mode = 'RANDOM' THEN
-                    -- Extract randomly to avoid disk page and index contention
                     SELECT run_task_id INTO v_run_task_id FROM bg.run_tasks WHERE run_id = p_run_id AND status = 'PENDING' ORDER BY RANDOM() LIMIT 1;
                 ELSE
-                    -- CONCURRENT_ORDERED: Extract sequentially (Ordered Pool)
                     SELECT run_task_id INTO v_run_task_id FROM bg.run_tasks WHERE run_id = p_run_id AND status = 'PENDING' ORDER BY execution_order ASC LIMIT 1;
                 END IF;
 
                 EXIT WHEN v_run_task_id IS NULL; 
 
-                SELECT public.pg_background_launch(pg_catalog.format('CALL bg.bg_task_executor(%L)', v_run_task_id)) INTO v_child_pid;
-                UPDATE bg.run_tasks SET status = 'RUNNING', started_at = pg_catalog.clock_timestamp(), child_pid = v_child_pid WHERE run_task_id = v_run_task_id;
-                COMMIT;
-                
-                v_active_slots := v_active_slots + 1;
+                v_launch_success := TRUE;
+                BEGIN
+                    SELECT public.pg_background_launch(pg_catalog.format('CALL bg.bg_task_executor(%L)', v_run_task_id)) INTO v_child_pid;
+                EXCEPTION WHEN OTHERS THEN
+                    v_launch_success := FALSE;
+                END;
+
+                IF v_launch_success THEN
+                    UPDATE bg.run_tasks SET status = 'RUNNING', started_at = pg_catalog.clock_timestamp(), child_pid = v_child_pid WHERE run_task_id = v_run_task_id;
+                    COMMIT;
+                    v_active_slots := v_active_slots + 1;
+                ELSE
+                    IF v_allocation_policy = 'STRICT' THEN
+                        -- FAIL-FAST MODO STRICT
+                        UPDATE bg.run_jobs SET status = 'FAILED', ended_at = pg_catalog.clock_timestamp(), execution_notes = '🛑 ABORTED: Hardware slot limit reached under STRICT policy.' WHERE run_id = p_run_id;
+                        
+                        -- Aniquilar hijos vivos para liberar recursos rápido
+                        FOR v_child_pid IN (SELECT child_pid FROM bg.run_tasks WHERE run_id = p_run_id AND status = 'RUNNING' AND child_pid IS NOT NULL) LOOP
+                            PERFORM pg_catalog.pg_cancel_backend(v_child_pid);
+                        END LOOP;
+
+                        UPDATE bg.run_tasks SET status = 'KILLED', error_log = 'Hardware capacity abort' WHERE run_id = p_run_id AND status IN ('PENDING', 'RUNNING');
+                        COMMIT; RETURN;
+                    ELSE
+                        -- AVISO MODO ADAPTIVE
+                        IF NOT v_throttled THEN
+                            UPDATE bg.run_jobs SET execution_notes = '⚠️ ADAPTIVE: Running in degraded mode. Hardware slots saturated.' WHERE run_id = p_run_id;
+                            v_throttled := TRUE;
+                            COMMIT;
+                        END IF;
+                        EXIT; -- Frenamos los lanzamientos temporalmente
+                    END IF;
+                END IF;
+
             END LOOP;
 
             PERFORM pg_catalog.pg_sleep(0.5); 
@@ -377,14 +402,15 @@ REVOKE EXECUTE ON PROCEDURE bg.bg_job_orchestrator(INT) FROM PUBLIC;
 --                  If it exists, it securely updates the latest steps.
 -- ============================================================================
 CREATE OR REPLACE FUNCTION bg.create_job_definition(
-    p_job_name VARCHAR(100), p_mode bg.execution_mode, p_queries TEXT[], p_timeout_seconds INT DEFAULT 300, p_max_retries INT DEFAULT 0, p_max_parallel_processes INT DEFAULT 1
+    p_job_name VARCHAR(100), p_mode bg.execution_mode, p_queries TEXT[], p_timeout_seconds INT DEFAULT 300, p_max_retries INT DEFAULT 0, p_max_parallel_processes INT DEFAULT 1,
+    p_allocation_policy VARCHAR DEFAULT 'ADAPTIVE' -- 👈 NUEVO PARÁMETRO
 ) RETURNS INT AS $$
 DECLARE v_job_id INT; v_query_id INT; v_query_text TEXT; v_order INT := 1;
 BEGIN
-    INSERT INTO bg.def_jobs (job_name, mode, timeout_seconds, max_retries, max_parallel_processes)
-    VALUES (p_job_name, p_mode, p_timeout_seconds, p_max_retries, p_max_parallel_processes)
+    INSERT INTO bg.def_jobs (job_name, mode, timeout_seconds, max_retries, max_parallel_processes, allocation_policy)
+    VALUES (p_job_name, p_mode, p_timeout_seconds, p_max_retries, p_max_parallel_processes, p_allocation_policy)
     ON CONFLICT (job_name) DO UPDATE 
-    SET mode = EXCLUDED.mode, timeout_seconds = EXCLUDED.timeout_seconds, max_retries = EXCLUDED.max_retries, max_parallel_processes = EXCLUDED.max_parallel_processes
+    SET mode = EXCLUDED.mode, timeout_seconds = EXCLUDED.timeout_seconds, max_retries = EXCLUDED.max_retries, max_parallel_processes = EXCLUDED.max_parallel_processes, allocation_policy = EXCLUDED.allocation_policy
     RETURNING job_id INTO v_job_id;
 
     DELETE FROM bg.def_tasks WHERE job_id = v_job_id; 
@@ -449,11 +475,12 @@ REVOKE EXECUTE ON FUNCTION bg.launch_job_by_name(VARCHAR) FROM PUBLIC;
 --                  for fast testing or one-off tasks.
 -- ============================================================================
 CREATE OR REPLACE FUNCTION bg.launch_job_one_shot(
-    p_job_name VARCHAR(100), p_mode bg.execution_mode, p_queries TEXT[], p_timeout_seconds INT DEFAULT 300, p_max_retries INT DEFAULT 0, p_max_parallel_processes INT DEFAULT 1
+    p_job_name VARCHAR(100), p_mode bg.execution_mode, p_queries TEXT[], p_timeout_seconds INT DEFAULT 300, p_max_retries INT DEFAULT 0, p_max_parallel_processes INT DEFAULT 1,
+    p_allocation_policy VARCHAR DEFAULT 'ADAPTIVE' -- 👈 NUEVO PARÁMETRO
 ) RETURNS INT AS $$
 DECLARE v_job_id INT;
 BEGIN
-    v_job_id := bg.create_job_definition(p_job_name, p_mode, p_queries, p_timeout_seconds, p_max_retries, p_max_parallel_processes);
+    v_job_id := bg.create_job_definition(p_job_name, p_mode, p_queries, p_timeout_seconds, p_max_retries, p_max_parallel_processes, p_allocation_policy);
     RETURN bg.start_job(v_job_id);
 END;
 $$ LANGUAGE plpgsql SET search_path = bg, public, pg_temp;
@@ -500,7 +527,7 @@ WITH cte_metrics AS (
     GROUP BY rt.run_id
 ),
 cte_clean AS (
-    SELECT rj.run_id, rj.status, rj.started_at, rj.ended_at, dj.job_name, dj.mode,
+    SELECT rj.run_id, rj.status, rj.started_at, rj.ended_at, rj.execution_notes, dj.job_name, dj.mode,
            COALESCE(m.total, 0) AS total, COALESCE(m.completed, 0) AS completed, COALESCE(m.errors, 0) AS errors, COALESCE(m.pending, 0) AS pending, COALESCE(m.active_workers, 0) AS active_workers
     FROM bg.run_jobs rj
     JOIN bg.def_jobs dj ON rj.job_id = dj.job_id
@@ -509,7 +536,8 @@ cte_clean AS (
 SELECT 
     run_id AS "execution_id", job_name AS "job_name", mode AS "execution_mode",
     CASE 
-        WHEN mode = 'SEQUENTIAL_STRICT' AND errors > 0 THEN '❌ ABORTED (STRICT FAILURE)'
+        WHEN status = 'FAILED' AND execution_notes ILIKE '%ABORTED%' THEN '🛑 ABORTED (HARDWARE LIMIT)'
+        WHEN mode IN ('SEQUENTIAL_STRICT', 'SEQUENTIAL_NORMAL') AND errors > 0 AND total = (completed + errors) THEN '❌ ABORTED (STRICT FAILURE)'
         WHEN total > 0 AND total = (completed + errors) AND errors > 0 THEN '⚠️ COMPLETED WITH ERRORS'
         WHEN total > 0 AND total = completed THEN '✅ COMPLETED'
         WHEN active_workers > 0 THEN '🔥 RUNNING (ENGINE ACTIVE)'
@@ -520,7 +548,8 @@ SELECT
     DATE_TRUNC('second', COALESCE(ended_at, CLOCK_TIMESTAMP()) - started_at) AS "duration",
     CASE WHEN total = 0 THEN '0%' ELSE ROUND(((completed + errors)::FLOAT / total::FLOAT) * 100)::TEXT || '%' END AS "progress_pct",
     '[' || REPEAT('█', CASE WHEN total = 0 THEN 0 ELSE ROUND(((completed + errors)::FLOAT / total::FLOAT) * 20)::INT END) || 
-    REPEAT('░', 20 - CASE WHEN total = 0 THEN 0 ELSE ROUND(((completed + errors)::FLOAT / total::FLOAT) * 20)::INT END) || ']' AS "progress_bar"
+    REPEAT('░', 20 - CASE WHEN total = 0 THEN 0 ELSE ROUND(((completed + errors)::FLOAT / total::FLOAT) * 20)::INT END) || ']' AS "progress_bar",
+    COALESCE(execution_notes, 'All systems nominal') AS "system_alerts" -- 👈 NUEVA COLUMNA PARA EL CLIENTE
 FROM cte_clean
 ORDER BY run_id DESC;
 
