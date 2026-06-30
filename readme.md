@@ -133,3 +133,24 @@ Don't worry, the system uses very simple tables and objects to keep track of eve
 * `bg.abort_job()`: **[NEW]** The global emergency brake (Kill Switch). It intercepts an active job, sends a SIGINT signal to cancel the parent orchestrator and all live workers at the OS level, and destroys the remaining queue instantly.
 
  
+---
+---
+
+## 🚀 Changelog & Updates (Edition: Diamond)
+
+### 🛡️ Security & Concurrency (Zero-Day Mitigations)
+* **Phantom Abort Race Condition Fixed:** Mitigated a critical vulnerability vector where Operating System latency caused the duplication of financial tasks. An **Optimistic Locking** shield (`AND status = 'RUNNING'`) was implemented in the Orchestrator, guaranteeing mathematical idempotency and protecting successful transactions against blind overwrites.
+* **CPU Leak Optimization:** Strict optimization in the retry validation loop (`v_failed_list`). The Orchestrator now filters in-memory only the failed tasks that still have attempts available (`attempt <= v_max_retries`), eliminating CPU cycle leaks caused by dead tasks.
+
+### ⚙️ Infrastructure & Resilience (Hardware Throttling)
+* **Hardware Throttling Valve:** The Orchestrator is now tolerant to physical server throttling. If the native PostgreSQL limit (`max_worker_processes`) is reached, the engine no longer collapses or panics. The system absorbs the impact asynchronously, pauses launches, and dynamically waits for resources to be freed on the host.
+* **Schema Drift Resolution:** Data dictionary standardization. The `execution_notes` audit column was moved to the correct transactional table (`bg.run_jobs`), ensuring the perfect compilation of corporate forensic views.
+
+### 🎛️ New Features (Resource Allocation Policies)
+Introduced the API-level control parameter `allocation_policy` in `launch_job_one_shot` and `create_job_definition`, granting the user total governance over hardware saturation:
+* **`ADAPTIVE` Mode (Default):** Faced with a lack of hardware resources, the job enters survival mode. The orchestrator pauses the launch, alerts the control panel (`⚠️ ADAPTIVE: Running in degraded mode`), and hoards slots as they become available.
+* **`STRICT` Mode (Fail-Fast):** Designed for critical SLAs. If the orchestrator does not obtain the requested physical resources at the exact moment of launch, it aborts immediately, annihilates the workers in flight, and notifies the collapse (`🛑 ABORTED: Hardware slot limit reached`), preventing slow executions and disk blocking.
+
+### 📐 Architectural Guidelines (Atomic Transactions)
+* **Official Rejection of the 2PC Pattern (`PREPARE TRANSACTION`):** For cluster security and *XID Wraparound* prevention, the orchestration of tasks with strict atomicity ("All or Nothing") does not use prepared transactions.
+* **Best Practice:** It is now standardized that dependent atomic operations must be semantically grouped into a single worker using native transactional blocks (`DO $$BEGIN ... EXCEPTION ... END$$;`) within the Orchestrator's queue.
