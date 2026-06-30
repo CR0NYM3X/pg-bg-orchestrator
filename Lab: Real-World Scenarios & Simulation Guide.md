@@ -9,6 +9,13 @@ Dear team, this laboratory demonstrates the raw power of the `bg` AROF framework
 We are going to create tables that simulate your company's reality: bank accounts, DBA cleanup logs, and IoT sensor records.
 
 ```sql
+
+\c postgres
+drop database bk;
+create database bk;
+\c bk
+
+
 -- 1. Create the isolated schema
 CREATE SCHEMA IF NOT EXISTS bg_lab;
 
